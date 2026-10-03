@@ -1,0 +1,86 @@
+name: Release
+
+# Push a tag like v0.8.0 to build the server for Windows, macOS and Linux and publish
+# a GitHub Release with SHA-256 checksums and a CycloneDX SBOM.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: --features tray
+            file: egd-server-windows-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            features: --features tray
+            file: egd-server-macos-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            features: --features tray
+            file: egd-server-macos-x64
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            features: ''
+            file: egd-server-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo test --locked
+        working-directory: server
+      - run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features }}
+        working-directory: server
+      - shell: bash
+        run: |
+          mkdir dist
+          src=server/target/${{ matrix.target }}/release/egd-server
+          [ -f "$src.exe" ] && src="$src.exe"
+          cp "$src" "dist/${{ matrix.file }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-cyclonedx --locked
+      - run: cargo cyclonedx --manifest-path server/Cargo.toml --format json --override-filename egd-server.sbom
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          cp server/egd-server.sbom.json dist/
+          cd dist && sha256sum * > SHA256SUMS.txt
+      # What's new: docs/releases/v<version>.md, written with every release.
+      - id: notes
+        run: |
+          v=$(grep -m1 '^version' server/Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          f="docs/releases/v$v.md"
+          { echo 'body<<NOTES_EOF'; if [ -f "$f" ]; then cat "$f"; fi; echo; echo 'NOTES_EOF'; } >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.notes.outputs.version) }}
+          name: Evelopment Games Designer Server v${{ steps.notes.outputs.version }}
+          body: ${{ steps.notes.outputs.body }}
+          files: dist/*

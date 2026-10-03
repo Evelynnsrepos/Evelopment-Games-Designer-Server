@@ -97,7 +97,7 @@ pub fn list(app: &App) -> Vec<PluginInfo> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok())
         .collect();
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo test --locked
+        working-directory: server
+      - run: cargo build --locked
+        working-directory: server
+      # End to end with the same yjs / y-protocols versions as the app.
+      - run: npm ci && npm test
+        working-directory: protocol
+      - if: matrix.os != 'ubuntu-latest'
+        run: cargo build --locked --features tray
+        working-directory: server
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: server/Cargo.toml
+          command: check advisories licenses bans sources

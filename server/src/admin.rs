@@ -3,12 +3,15 @@
 //! session cookie, CSRF token on every change, strict CSP, nothing loaded from
 //! outside, login rate limiting. Admin actions go to an audit log without IPs.
 
+// Handlers return a Response as their error, the usual axum style.
+#![allow(clippy::result_large_err)]
+
 use crate::sync::{Role, dir_size};
 use crate::util::{b64, now, random_token, same};
 use crate::{App, backup, plugins, tls};
+use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use argon2::Argon2;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -132,10 +135,32 @@ fn start_session(app: &App) -> Response {
 
 /// A short list of passwords people pick most; the length rule catches most of the rest.
 const COMMON: &[&str] = &[
-    "123456789012", "1234567890123", "password1234", "passwort1234", "qwertzuiop12", "qwertyuiop12", "111111111111",
-    "000000000000", "aaaaaaaaaaaa", "abcdefghijkl", "iloveyou1234", "password123!", "passwort123!", "adminadmin12",
-    "administrator", "letmein12345", "welcome12345", "willkommen12", "hallo1234567", "sommer202020", "changeme1234",
-    "qwerty123456", "123qweasdzxc", "1q2w3e4r5t6y", "evelopment12", "gamedesigner",
+    "123456789012",
+    "1234567890123",
+    "password1234",
+    "passwort1234",
+    "qwertzuiop12",
+    "qwertyuiop12",
+    "111111111111",
+    "000000000000",
+    "aaaaaaaaaaaa",
+    "abcdefghijkl",
+    "iloveyou1234",
+    "password123!",
+    "passwort123!",
+    "adminadmin12",
+    "administrator",
+    "letmein12345",
+    "welcome12345",
+    "willkommen12",
+    "hallo1234567",
+    "sommer202020",
+    "changeme1234",
+    "qwerty123456",
+    "123qweasdzxc",
+    "1q2w3e4r5t6y",
+    "evelopment12",
+    "gamedesigner",
 ];
 
 fn check_password(pw: &str) -> Result<(), String> {
@@ -253,7 +278,10 @@ async fn login(State(app): State<Arc<App>>, Json(l): Json<Login>) -> ApiResult {
     {
         let fails = lock(&app.sessions.fails);
         if fails.1 > now() {
-            return Err(err(StatusCode::TOO_MANY_REQUESTS, &format!("Too many wrong passwords. Try again in {} seconds.", fails.1 - now())));
+            return Err(err(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("Too many wrong passwords. Try again in {} seconds.", fails.1 - now()),
+            ));
         }
     }
     let ok = tokio::task::spawn_blocking({

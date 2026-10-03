@@ -1,0 +1,18 @@
+# docker compose -f packaging/docker-compose.yml up -d
+# Then open http://127.0.0.1:8475/admin on the host (or through an SSH tunnel).
+services:
+  egd-server:
+    build:
+      context: ..
+      dockerfile: packaging/Dockerfile
+    restart: unless-stopped
+    read_only: true            # only /data is writable
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - egd-data:/data
+    ports:
+      - "127.0.0.1:8475:8475"  # admin page: this computer only
+      - "127.0.0.1:8474:8474"  # sync: put nginx in front (wizard: "Behind nginx"), or use "8474:8474" with the self-signed mode
+volumes:
+  egd-data:

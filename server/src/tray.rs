@@ -51,7 +51,13 @@ fn icon() -> Icon {
     for y in 0..N {
         for x in 0..N {
             let d = (((x - N / 2) * (x - N / 2) + (y - N / 2) * (y - N / 2)) as f32).sqrt();
-            let px = if d < 9.0 { [255, 255, 255, 255] } else if d < 15.5 { [103, 65, 217, 255] } else { [0, 0, 0, 0] };
+            let px = if d < 9.0 {
+                [255, 255, 255, 255]
+            } else if d < 15.5 {
+                [103, 65, 217, 255]
+            } else {
+                [0, 0, 0, 0]
+            };
             rgba.extend_from_slice(&px);
         }
     }

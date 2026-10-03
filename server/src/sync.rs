@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use yrs::sync::SyncMessage;
+use yrs::types::ToJson;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::types::ToJson;
 use yrs::{Doc, GetString, ReadTxn, StateVector, Transact, Update};
 
 pub const PROTOCOL_VERSION: i64 = 1;
@@ -600,10 +600,7 @@ impl Room {
                 continue;
             }
             let lacking = self.lacking.get(&path);
-            let from = self
-                .peers
-                .iter()
-                .find(|(id, p)| p.ready && p.role == Role::Write && !lacking.is_some_and(|l| l.contains(id)));
+            let from = self.peers.iter().find(|(id, p)| p.ready && p.role == Role::Write && !lacking.is_some_and(|l| l.contains(id)));
             let Some((&id, peer)) = from else { continue };
             peer.send(json_frame(msg::ASSET_REQUEST, &json!({ "path": path })));
             self.incoming.insert(path, Incoming { buf: vec![], received: 0, from: id });
@@ -831,21 +828,21 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
         let busy = r.peers.values().filter(|p| p.key_hash == key.hash).count() >= MAX_CONNS_PER_KEY;
         if !busy {
             r.peers.insert(
-            conn,
-            Peer {
-                tx: tx.clone(),
-                key_hash: key.hash.clone(),
-                device_id: device_id_for_key(&auth.key),
-                role,
-                name: String::new(),
-                project_id: String::new(),
-                since: now(),
-                sent_welcome: false,
-                got_welcome: false,
-                ready: false,
-                clients: HashSet::new(),
-                strikes: 0,
-            },
+                conn,
+                Peer {
+                    tx: tx.clone(),
+                    key_hash: key.hash.clone(),
+                    device_id: device_id_for_key(&auth.key),
+                    role,
+                    name: String::new(),
+                    project_id: String::new(),
+                    since: now(),
+                    sent_welcome: false,
+                    got_welcome: false,
+                    ready: false,
+                    clients: HashSet::new(),
+                    strikes: 0,
+                },
             );
         }
         (busy, empty)
@@ -905,10 +902,10 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
             // A malformed message must never take the server down: a panic inside a decoder only drops this connection.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.handle(&app, conn, &data)))
                 .unwrap_or_else(|_| Err("malformed message".into()));
-            if result.is_err() {
-                if let Some(p) = r.peers.get(&conn) {
-                    p.close();
-                }
+            if result.is_err()
+                && let Some(p) = r.peers.get(&conn)
+            {
+                p.close();
             }
             result.err()
         };
@@ -1034,8 +1031,7 @@ mod tests {
                 2 => data.truncate((next() as usize) % (data.len() + 1)),
                 _ => data.extend((0..(next() % 16)).map(|_| next() as u8)),
             }
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.handle(&app, conn, &data)))
-                .expect("handle panicked");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.handle(&app, conn, &data))).expect("handle panicked");
             if !r.peers.contains_key(&conn) {
                 let (_, rx) = ready_peer(&mut r, Role::Write);
                 std::mem::forget(rx);

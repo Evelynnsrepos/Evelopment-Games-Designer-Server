@@ -1,0 +1,26 @@
+# systemd unit. Install:
+#   sudo useradd --system --home /var/lib/egd-server egd
+#   sudo install -m 755 egd-server /usr/local/bin/
+#   sudo cp egd-server.service /etc/systemd/system/ && sudo systemctl enable --now egd-server
+[Unit]
+Description=Evelopment Games Designer Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=egd
+ExecStart=/usr/local/bin/egd-server --data /var/lib/egd-server --no-browser --headless
+StateDirectory=egd-server
+Restart=on-failure
+# Hardening: the server only needs its data folder.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/egd-server
+# Only for the Let's Encrypt mode on port 443:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
