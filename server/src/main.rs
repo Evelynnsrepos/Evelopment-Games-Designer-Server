@@ -151,8 +151,6 @@ async fn run(app: Arc<App>, open_browser: bool) {
         .route("/", get(|| async { "Evelopment Games Designer server. Connect from the app with a connect code.\n" }))
         .route("/health", get(|| async { "ok" }))
         .route("/sync", get(sync::ws_handler))
-        .route("/plugins", get(plugins::api_list))
-        .route("/plugins/{file}", get(plugins::api_download))
         .with_state(app.clone());
 
     let admin_listener = tokio::net::TcpListener::bind(app.admin_addr)

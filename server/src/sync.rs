@@ -75,6 +75,8 @@ impl Role {
 
 pub enum Out {
     Bin(Vec<u8>),
+    /// Control messages outside protocol v1 (plugins).
+    Text(String),
     Close,
 }
 
@@ -750,14 +752,16 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
     let role = Role::parse(&key.role).unwrap_or(Role::View);
     let conn = app.hub.next_conn.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = unbounded_channel::<Out>();
-    let busy = {
+    let control = tx.clone();
+    let (busy, empty) = {
         let mut r = lock(&room);
+        let empty = r.doc.transact().state_vector().is_empty();
         let busy = r.peers.values().filter(|p| p.key_hash == key.hash).count() >= MAX_CONNS_PER_KEY;
         if !busy {
             r.peers.insert(
             conn,
             Peer {
-                tx,
+                tx: tx.clone(),
                 key_hash: key.hash.clone(),
                 device_id: device_id_for_key(&auth.key),
                 role,
@@ -771,8 +775,9 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
             },
             );
         }
-        busy
+        (busy, empty)
     };
+    drop(tx);
     if busy {
         let _ = socket.send(fail("busy")).await;
         return;
@@ -785,6 +790,8 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
         "projectId": project.id,
         "projectName": project.name,
         "role": role.as_str(),
+        // Nothing stored yet: the app may upload an existing project ("Move to server").
+        "empty": empty,
     });
 
     // 2. Protocol v1 in binary frames, with a writer task so the room lock is never held across awaits.
@@ -799,6 +806,7 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
             tokio::select! {
                 out = rx.recv() => match out {
                     Some(Out::Bin(b)) => if sink.send(Message::Binary(b.into())).await.is_err() { break },
+                    Some(Out::Text(t)) => if sink.send(Message::Text(t.into())).await.is_err() { break },
                     Some(Out::Close) | None => { let _ = sink.send(Message::Close(None)).await; break }
                 },
                 _ = ping.tick() => if sink.send(Message::Ping(Vec::new().into())).await.is_err() { break },
@@ -810,8 +818,12 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
         let next = tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await;
         let data = match next {
             Ok(Some(Ok(Message::Binary(b)))) => b,
+            Ok(Some(Ok(Message::Text(t)))) => {
+                control_message(&app, &control, &t).await;
+                continue;
+            }
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
-            _ => break, // closed, error, text after auth, or idle too long
+            _ => break, // closed, error, or idle too long
         };
         let failed = {
             let mut r = lock(&room);
@@ -832,4 +844,22 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
     }
     lock(&room).remove_peer(conn);
     let _ = writer.await;
+}
+
+/// Text messages next to protocol v1: the plugins this server offers.
+/// `{"type":"plugins"}` lists them; `{"type":"plugin","id":...}` sends one zip (base64).
+async fn control_message(app: &App, out: &UnboundedSender<Out>, text: &str) {
+    let Ok(m) = serde_json::from_str::<serde_json::Value>(text) else { return };
+    let reply = match m["type"].as_str() {
+        Some("plugins") => json!({ "type": "plugins", "plugins": crate::plugins::list(app) }),
+        Some("plugin") => {
+            let id = m["id"].as_str().unwrap_or("");
+            match crate::plugins::read(app, id).await {
+                Some((info, zip)) => json!({ "type": "plugin", "id": id, "sha256": info.sha256, "zip": crate::util::b64(&zip) }),
+                None => json!({ "type": "plugin", "id": id, "missing": true }),
+            }
+        }
+        _ => return,
+    };
+    let _ = out.send(Out::Text(reply.to_string()));
 }

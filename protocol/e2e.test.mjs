@@ -103,6 +103,7 @@ test('a wrong key is refused', async () => {
 test('two people sync through the server without ever being online together', async () => {
   const ana = await new TestClient(sync, writeKey, { name: 'Ana' }).connect()
   assert.equal(ana.role, 'write')
+  assert.equal(ana.empty, true)
   await until(() => ana.synced, 'ana synced')
   ana.doc.getMap('meta').set('name', 'Space Game')
   ana.doc.getMap('doc:story/1').set('title', 'Chapter one')
@@ -176,16 +177,19 @@ test('revoking a key disconnects it at once and it stops working', async () => {
   assert.equal(again.authError, 'bad-key')
 })
 
-test('plugins: installed on the server, listed and downloaded with a key', async () => {
+test('plugins: installed on the server and sent to apps over their connection', async () => {
   const zip = await makePluginZip()
   const info = await api('POST', 'plugins', zip, true)
   assert.equal(info.id, 'dice-roller')
-  const unauth = await fetch(`http://127.0.0.1:${SYNC}/plugins`)
-  assert.equal(unauth.status, 401)
-  const list = await (await fetch(`http://127.0.0.1:${SYNC}/plugins`, { headers: { authorization: `Bearer ${viewKey}` } })).json()
-  assert.equal(list[0].id, 'dice-roller')
-  const dl = await fetch(`http://127.0.0.1:${SYNC}/plugins/dice-roller.zip`, { headers: { authorization: `Bearer ${viewKey}` } })
-  assert.equal(Buffer.from(await dl.arrayBuffer()).length, zip.length)
+  const guest = await new TestClient(sync, viewKey, { name: 'Guest' }).connect()
+  const list = await guest.control({ type: 'plugins' })
+  assert.equal(list.plugins[0].id, 'dice-roller')
+  assert.equal(list.plugins[0].sha256, info.sha256)
+  const one = await guest.control({ type: 'plugin', id: 'dice-roller' })
+  assert.deepEqual(Buffer.from(one.zip, 'base64'), zip)
+  const none = await guest.control({ type: 'plugin', id: '../etc' })
+  assert.equal(none.missing, true)
+  await guest.close()
 })
 
 test('backup, close, restore, and everything survives a restart', async () => {

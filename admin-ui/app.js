@@ -389,7 +389,7 @@ async function backups() {
 function nginxConfig(s) {
   const port = s.syncAddr.split(':').pop()
   return `# Inside your server { ... } block for the domain, with HTTPS already set up.
-# Only /sync and /plugins are forwarded: the admin page stays on the server itself.
+# Only /sync is forwarded: the admin page stays on the server itself.
 location /sync {
     proxy_pass http://127.0.0.1:${port};
     proxy_http_version 1.1;
@@ -398,11 +398,6 @@ location /sync {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_read_timeout 120s;
     access_log off;   # no IP addresses in logs
-}
-location /plugins {
-    proxy_pass http://127.0.0.1:${port};
-    proxy_set_header X-Real-IP $remote_addr;
-    access_log off;
 }`
 }
 

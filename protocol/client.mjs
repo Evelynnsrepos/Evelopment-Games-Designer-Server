@@ -40,6 +40,7 @@ export class TestClient {
     this.ready = false
     this.synced = false
     this.authError = null
+    this.controls = [] // text replies to control messages
     this.serverId = null
     this.peersAwareness = () => [...this.awareness.getStates().keys()].filter((id) => id !== doc.clientID)
   }
@@ -78,6 +79,10 @@ export class TestClient {
       ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') {
           const m = JSON.parse(ev.data)
+          if (m.type !== 'auth-ok' && m.type !== 'auth-error') {
+            this.controls.push(m)
+            return
+          }
           if (m.type === 'auth-error') {
             this.authError = m.reason
             return resolve(this)
@@ -85,6 +90,7 @@ export class TestClient {
           this.serverId = m.serverId
           this.role = m.role
           this.projectId = m.projectId
+          this.empty = m.empty
           this.open = true
           this.send(jsonFrame(MSG.hello, { protocol: 1, schema: this.schema, projectId: m.projectId, deviceId: deviceIdForKey(this.key), name: this.name, color: '#123456' }))
           return
@@ -152,6 +158,14 @@ export class TestClient {
 
   send(data) {
     if (this.ws?.readyState === 1) this.ws.send(data)
+  }
+
+  /** A control message (plugins); resolves with the reply of the same type. */
+  async control(message) {
+    const before = this.controls.length
+    this.ws.send(JSON.stringify(message))
+    await until(() => this.controls.slice(before).some((c) => c.type === message.type), `reply to ${message.type}`)
+    return this.controls.slice(before).find((c) => c.type === message.type)
   }
 
   requestAsset(path) {

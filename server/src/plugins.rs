@@ -1,18 +1,12 @@
 //! Plugins installed on the server. The admin uploads a plugin zip (the same
 //! format the app installs); apps connected to this server can list and download
-//! them with their key. The app never installs one on its own: it shows the
+//! them over their sync connection (see sync::control_message). The app never installs one on its own: it shows the
 //! plugin warning first (plugins are programs and run unsandboxed).
 
 use crate::App;
 use crate::util::{now, sha256_hex};
-use axum::body::Bytes;
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-use std::sync::Arc;
 
 pub const MAX_PLUGIN_BYTES: usize = 20 * 1024 * 1024;
 
@@ -127,37 +121,14 @@ pub fn remove(app: &App, id: &str) -> bool {
     had
 }
 
-// ---- for apps (sync port, needs a key) ------------------------------------------
-
-fn authorized(app: &App, headers: &HeaderMap) -> bool {
-    let key = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    match key.and_then(|k| app.db.find_key(k)) {
-        Some(k) => k.expires.is_none_or(|e| e > now()),
-        None => false,
+/// One installed plugin and its zip, for apps connected to this server.
+pub async fn read(app: &App, id: &str) -> Option<(PluginInfo, Vec<u8>)> {
+    if !valid_id(id) {
+        return None;
     }
-}
-
-pub async fn api_list(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if !authorized(&app, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    Json(list(&app)).into_response()
-}
-
-pub async fn api_download(State(app): State<Arc<App>>, headers: HeaderMap, Path(file): Path<String>) -> Response {
-    if !authorized(&app, &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(id) = file.strip_suffix(".zip").filter(|id| valid_id(id)) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    match std::fs::read(dir(&app).join(format!("{id}.zip"))) {
-        Ok(bytes) => ([(header::CONTENT_TYPE, "application/zip")], Bytes::from(bytes)).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+    let info = list(app).into_iter().find(|p| p.id == id)?;
+    let zip = tokio::fs::read(dir(app).join(format!("{id}.zip"))).await.ok()?;
+    Some((info, zip))
 }
 
 #[cfg(test)]
