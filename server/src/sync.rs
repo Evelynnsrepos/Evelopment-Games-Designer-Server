@@ -86,6 +86,8 @@ pub struct Peer {
     pub device_id: String,
     pub role: Role,
     pub name: String,
+    /// The project id this app uses (from its hello).
+    project_id: String,
     pub since: i64,
     sent_welcome: bool,
     got_welcome: bool,
@@ -114,6 +116,8 @@ pub struct Room {
     pub id: String,
     pub name: String,
     schema: Option<i64>,
+    /// The app's id for this project; None until someone uploads it.
+    app_id: Option<String>,
     doc: Doc,
     /// Presence of everyone connected: client id -> (clock, JSON state). Never saved.
     awareness: HashMap<u64, (u32, Arc<str>)>,
@@ -219,6 +223,7 @@ impl Hub {
             id: p.id.clone(),
             name: p.name,
             schema: p.schema,
+            app_id: p.app_id,
             doc,
             awareness: HashMap::new(),
             peers: HashMap::new(),
@@ -361,7 +366,7 @@ impl Room {
                 Ok(())
             }
             msg::REJECT | msg::CLOSED => Err("peer left".into()),
-            msg::SYNC if ready => self.on_sync(conn, payload),
+            msg::SYNC if ready => self.on_sync(app, conn, payload),
             msg::AWARENESS if ready => self.on_awareness(conn, payload),
             msg::ASSET_REQUEST if ready => {
                 #[derive(Deserialize)]
@@ -396,7 +401,7 @@ impl Room {
             }
             _ => {}
         }
-        if h.project_id != self.id {
+        if self.app_id.as_ref().is_some_and(|id| *id != h.project_id) {
             self.reject(conn, "project");
             return Ok(());
         }
@@ -405,6 +410,7 @@ impl Room {
             self.reject(conn, "not-member");
             return Ok(());
         }
+        peer.project_id = h.project_id.clone();
         peer.name = h.name.chars().filter(|c| !c.is_control()).take(60).collect();
         app.db.set_key_name(&peer.key_hash, &peer.name);
         let server_name = app.db.get_or("server_name", "Evelopment server");
@@ -413,13 +419,13 @@ impl Room {
             &json!({
                 "protocol": PROTOCOL_VERSION,
                 "schema": h.schema,
-                "projectId": self.id,
+                "projectId": h.project_id,
                 "deviceId": app.server_id,
                 "name": server_name,
                 "color": "#868e96",
             }),
         ));
-        peer.send(json_frame(msg::WELCOME, &json!({ "projectId": self.id, "projectName": self.name })));
+        peer.send(json_frame(msg::WELCOME, &json!({ "projectId": h.project_id, "projectName": self.name })));
         peer.sent_welcome = true;
         self.maybe_ready(conn);
         Ok(())
@@ -446,7 +452,7 @@ impl Room {
         }
     }
 
-    fn on_sync(&mut self, conn: u64, payload: &[u8]) -> Result<(), String> {
+    fn on_sync(&mut self, app: &App, conn: u64, payload: &[u8]) -> Result<(), String> {
         let m = SyncMessage::decode_v1(payload).map_err(|e| e.to_string())?;
         let update = match m {
             SyncMessage::SyncStep1(sv) => {
@@ -472,6 +478,18 @@ impl Room {
         }
         if decoded.is_empty() {
             return Ok(());
+        }
+        if self.app_id.is_none() {
+            // First upload: this project now belongs to that app project id; anyone else is turned away.
+            let id = peer.project_id.clone();
+            app.db.set_app_id(&self.id, Some(&id));
+            for (other, p) in &self.peers {
+                if *other != conn && p.project_id != id {
+                    p.send(json_frame(msg::REJECT, &json!({ "reason": "project" })));
+                    p.close();
+                }
+            }
+            self.app_id = Some(id);
         }
         self.doc.transact_mut().apply_update(decoded).map_err(|e| e.to_string())?;
         self.dirty = true;
@@ -766,6 +784,7 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
                 device_id: device_id_for_key(&auth.key),
                 role,
                 name: String::new(),
+                project_id: String::new(),
                 since: now(),
                 sent_welcome: false,
                 got_welcome: false,
@@ -787,7 +806,9 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
         "type": "auth-ok",
         "serverId": app.server_id,
         "serverName": app.db.get_or("server_name", "Evelopment server"),
-        "projectId": project.id,
+        // The app's project id once the project was uploaded (null while it's empty).
+        "projectId": project.app_id,
+        "serverProjectId": project.id,
         "projectName": project.name,
         "role": role.as_str(),
         // Nothing stored yet: the app may upload an existing project ("Move to server").

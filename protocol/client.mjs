@@ -30,8 +30,8 @@ export function decodeConnectCode(code) {
 }
 
 export class TestClient {
-  constructor(url, key, { name = 'Tester', schema = SCHEMA, doc = new Y.Doc() } = {}) {
-    Object.assign(this, { url, key, name, schema, doc })
+  constructor(url, key, { name = 'Tester', schema = SCHEMA, doc = new Y.Doc(), appId } = {}) {
+    Object.assign(this, { url, key, name, schema, doc, appId })
     this.awareness = new awarenessProtocol.Awareness(doc)
     this.assets = new Map() // path -> Uint8Array (files this "device" has)
     this.received = new Map() // path -> Uint8Array (fetched from the server)
@@ -92,7 +92,7 @@ export class TestClient {
           this.projectId = m.projectId
           this.empty = m.empty
           this.open = true
-          this.send(jsonFrame(MSG.hello, { protocol: 1, schema: this.schema, projectId: m.projectId, deviceId: deviceIdForKey(this.key), name: this.name, color: '#123456' }))
+          this.send(jsonFrame(MSG.hello, { protocol: 1, schema: this.schema, projectId: this.appId ?? m.projectId ?? 'app-project-1', deviceId: deviceIdForKey(this.key), name: this.name, color: '#123456' }))
           return
         }
         const data = new Uint8Array(ev.data)

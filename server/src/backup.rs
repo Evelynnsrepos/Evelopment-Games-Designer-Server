@@ -16,7 +16,7 @@ pub fn project_zip(app: &App, id: &str) -> Result<Vec<u8>, String> {
     let mut buf = std::io::Cursor::new(Vec::new());
     let mut z = zip::ZipWriter::new(&mut buf);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let meta = serde_json::json!({ "format": 1, "id": p.id, "name": p.name, "schema": p.schema, "saved": now() });
+    let meta = serde_json::json!({ "format": 1, "id": p.id, "name": p.name, "schema": p.schema, "appId": p.app_id, "saved": now() });
     let mut add = |name: &str, bytes: &[u8]| -> Result<(), String> {
         z.start_file(name, opts).map_err(|e| e.to_string())?;
         z.write_all(bytes).map_err(|e| e.to_string())
@@ -46,10 +46,13 @@ pub fn restore_project(app: &App, id: &str, zip_bytes: &[u8]) -> Result<(), Stri
         yrs::Update::decode_v1(&state).map_err(|_| "state.bin is damaged.".to_string())?;
     }
     let mut schema = None;
+    let mut app_id = None;
     if let Ok(mut f) = z.by_name("project.json") {
         let mut text = String::new();
         let _ = f.read_to_string(&mut text);
-        schema = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v["schema"].as_i64());
+        let v = serde_json::from_str::<serde_json::Value>(&text).unwrap_or_default();
+        schema = v["schema"].as_i64();
+        app_id = v["appId"].as_str().map(String::from);
     }
     let assets = app.project_dir(id).join("assets");
     let _ = std::fs::remove_dir_all(&assets);
@@ -76,6 +79,7 @@ pub fn restore_project(app: &App, id: &str, zip_bytes: &[u8]) -> Result<(), Stri
     if let Some(s) = schema {
         app.db.set_schema(id, s);
     }
+    app.db.set_app_id(id, app_id.as_deref());
     Ok(())
 }
 

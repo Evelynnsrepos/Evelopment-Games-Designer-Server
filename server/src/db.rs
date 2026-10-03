@@ -14,6 +14,8 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub schema: Option<i64>,
+    /// The project's id inside the app (its meta id). Set by the first upload.
+    pub app_id: Option<String>,
     pub quota_mb: i64,
     pub archived: bool,
     pub created: i64,
@@ -44,7 +46,7 @@ impl Db {
              PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS projects (
-               id TEXT PRIMARY KEY, name TEXT NOT NULL, schema INTEGER, state BLOB,
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, schema INTEGER, app_id TEXT, state BLOB,
                quota_mb INTEGER NOT NULL, archived INTEGER NOT NULL DEFAULT 0,
                created INTEGER NOT NULL, last_used INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS keys (
@@ -83,14 +85,14 @@ impl Db {
     pub fn projects(&self) -> Vec<Project> {
         let conn = self.conn();
         let mut stmt = conn
-            .prepare("SELECT id,name,schema,quota_mb,archived,created,last_used FROM projects ORDER BY name COLLATE NOCASE")
+            .prepare("SELECT id,name,schema,quota_mb,archived,created,last_used,app_id FROM projects ORDER BY name COLLATE NOCASE")
             .unwrap();
         stmt.query_map([], project_row).unwrap().filter_map(Result::ok).collect()
     }
 
     pub fn project(&self, id: &str) -> Option<Project> {
         self.conn()
-            .query_row("SELECT id,name,schema,quota_mb,archived,created,last_used FROM projects WHERE id=?", [id], project_row)
+            .query_row("SELECT id,name,schema,quota_mb,archived,created,last_used,app_id FROM projects WHERE id=?", [id], project_row)
             .optional()
             .ok()
             .flatten()
@@ -123,6 +125,10 @@ impl Db {
 
     pub fn set_schema(&self, id: &str, schema: i64) {
         let _ = self.conn().execute("UPDATE projects SET schema=? WHERE id=?", params![schema, id]);
+    }
+
+    pub fn set_app_id(&self, id: &str, app_id: Option<&str>) {
+        let _ = self.conn().execute("UPDATE projects SET app_id=? WHERE id=?", params![app_id, id]);
     }
 
     pub fn load_state(&self, id: &str) -> Option<Vec<u8>> {
@@ -223,6 +229,7 @@ fn project_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
         archived: r.get::<_, i64>(4)? != 0,
         created: r.get(5)?,
         last_used: r.get(6)?,
+        app_id: r.get(7)?,
     })
 }
 

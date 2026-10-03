@@ -156,6 +156,16 @@ test('a view key can read but never change anything', async () => {
   await ben.close()
 })
 
+test('the first upload binds the project to its app project id', async () => {
+  const other = await new TestClient(sync, writeKey2, { appId: 'some-other-project' }).connect()
+  assert.equal(other.rejected?.reason, 'project')
+  await other.close()
+  const ok = await new TestClient(sync, writeKey2).connect()
+  assert.equal(ok.projectId, 'app-project-1')
+  assert.equal(ok.empty, false)
+  await ok.close()
+})
+
 test('an older or newer app is told to update', async () => {
   const c = await new TestClient(sync, writeKey, { schema: 99 }).connect()
   assert.equal(c.rejected?.reason, 'version')
