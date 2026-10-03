@@ -78,7 +78,7 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           f="docs/releases/v$v.md"
           { echo 'body<<NOTES_EOF'; if [ -f "$f" ]; then cat "$f"; fi; echo; echo 'NOTES_EOF'; } >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.notes.outputs.version) }}
           name: Evelopment Games Designer Server v${{ steps.notes.outputs.version }}
