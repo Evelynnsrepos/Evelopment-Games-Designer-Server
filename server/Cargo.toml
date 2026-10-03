@@ -19,11 +19,13 @@ rustls-acme = { version = "0.15.4", features = ["axum"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+tao = { version = "0.37", optional = true }
 tokio = { version = "1.53.1", features = ["full"] }
+tray-icon = { version = "0.25", optional = true }
 yrs = "0.28.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [features]
 default = []
 # Tray icon with a menu (open admin page, quit). Built for the Windows and macOS downloads.
-tray = []
+tray = ["dep:tray-icon", "dep:tao"]

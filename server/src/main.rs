@@ -210,9 +210,23 @@ async fn run(app: Arc<App>, open_browser: bool) {
         open_url(&app.admin_url());
     }
 
-    let _ = tokio::signal::ctrl_c().await;
+    shutdown_signal().await;
     println!("Saving and stopping…");
     app.hub.save_all(&app);
+}
+
+/// Ctrl+C, or SIGTERM (Docker, systemd).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Expired keys, optional auto-delete of unused projects, daily backups.
