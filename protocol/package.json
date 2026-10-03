@@ -1,0 +1,14 @@
+{
+  "name": "egd-server-protocol-tests",
+  "private": true,
+  "type": "module",
+  "description": "Checks the server against protocol v1 with the same yjs packages the app uses.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "lib0": "0.2.119",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.33"
+  }
+}
