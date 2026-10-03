@@ -18,12 +18,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-use yrs::sync::awareness::AwarenessUpdateEntry;
-use yrs::sync::{AwarenessUpdate, SyncMessage};
+use yrs::sync::SyncMessage;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::types::ToJson;
-use yrs::{ClientID, Doc, GetString, ReadTxn, StateVector, Transact, Update};
+use yrs::{Doc, GetString, ReadTxn, StateVector, Transact, Update};
 
 pub const PROTOCOL_VERSION: i64 = 1;
 
@@ -440,12 +439,8 @@ impl Room {
         let sv = self.doc.transact().state_vector();
         p.send(sync_frame(SyncMessage::SyncStep1(sv)));
         if !self.awareness.is_empty() {
-            let clients = self
-                .awareness
-                .iter()
-                .map(|(id, (clock, json))| (ClientID::new(*id), AwarenessUpdateEntry { clock: *clock, json: json.clone() }))
-                .collect();
-            p.send(frame(msg::AWARENESS, &AwarenessUpdate { clients }.encode_v1()));
+            let all: Vec<_> = self.awareness.iter().map(|(id, (clock, json))| (*id, *clock, json.clone())).collect();
+            p.send(frame(msg::AWARENESS, &encode_awareness(&all)));
         }
         if p.role == Role::Write {
             self.scan = true;
@@ -499,19 +494,21 @@ impl Room {
     }
 
     fn on_awareness(&mut self, conn: u64, payload: &[u8]) -> Result<(), String> {
-        let update = AwarenessUpdate::decode_v1(payload).map_err(|e| e.to_string())?;
+        let entries = decode_awareness(payload).ok_or("bad awareness update")?;
         let peer = self.peers.get_mut(&conn).ok_or("gone")?;
-        for (id, entry) in &update.clients {
-            let id = id.get();
+        for (id, clock, json) in entries {
             // A connection may only speak for client ids no other connection uses.
             if !peer.clients.contains(&id) && self.awareness.contains_key(&id) {
                 return Err("awareness for someone else's client".into());
             }
-            if &*entry.json == "null" {
+            if &*json == "null" {
                 self.awareness.remove(&id);
                 peer.clients.remove(&id);
             } else {
-                self.awareness.insert(id, (entry.clock, entry.json.clone()));
+                if peer.clients.len() >= 16 && !peer.clients.contains(&id) {
+                    return Err("too many presence entries".into());
+                }
+                self.awareness.insert(id, (clock, json));
                 peer.clients.insert(id);
             }
         }
@@ -528,14 +525,13 @@ impl Room {
         if peer.clients.is_empty() {
             return;
         }
-        let mut clients = HashMap::new();
-        for id in &peer.clients {
-            if let Some((clock, _)) = self.awareness.remove(id) {
-                clients.insert(ClientID::new(*id), AwarenessUpdateEntry { clock: clock + 1, json: "null".into() });
-            }
-        }
-        if !clients.is_empty() {
-            self.broadcast(conn, &frame(msg::AWARENESS, &AwarenessUpdate { clients }.encode_v1()));
+        let gone: Vec<_> = peer
+            .clients
+            .iter()
+            .filter_map(|id| self.awareness.remove(id).map(|(clock, _)| (*id, clock.wrapping_add(1), Arc::from("null"))))
+            .collect();
+        if !gone.is_empty() {
+            self.broadcast(conn, &frame(msg::AWARENESS, &encode_awareness(&gone)));
         }
     }
 
@@ -636,7 +632,7 @@ impl Room {
             self.scan = true;
             return Ok(());
         }
-        if h.total as u64 > MAX_ASSET_BYTES || h.offset + bytes.len() > h.total {
+        if h.total as u64 > MAX_ASSET_BYTES || h.offset.checked_add(bytes.len()).is_none_or(|end| end > h.total) {
             give_up(self);
             return Ok(());
         }
@@ -668,6 +664,64 @@ impl Room {
         self.scan = true;
         Ok(())
     }
+}
+
+// ---- awareness (presence) wire format, lib0 encoding as in y-protocols ------------------
+// Decoded here rather than by yrs so every value from the network is range-checked.
+
+const MAX_CLIENT_ID: u64 = (1 << 53) - 1;
+
+fn read_var(b: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *b.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn write_var(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push((v as u8 & 0x7f) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+/// `[count, (client id, clock, JSON state)*]`.
+fn decode_awareness(b: &[u8]) -> Option<Vec<(u64, u32, Arc<str>)>> {
+    let mut pos = 0;
+    let n = read_var(b, &mut pos)?;
+    if n > 64 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        let id = read_var(b, &mut pos).filter(|id| *id <= MAX_CLIENT_ID)?;
+        let clock = u32::try_from(read_var(b, &mut pos)?).ok()?;
+        let len = usize::try_from(read_var(b, &mut pos)?).ok()?;
+        let end = pos.checked_add(len)?;
+        let json = std::str::from_utf8(b.get(pos..end)?).ok()?;
+        pos = end;
+        out.push((id, clock, Arc::from(json)));
+    }
+    Some(out)
+}
+
+fn encode_awareness(entries: &[(u64, u32, Arc<str>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_var(&mut out, entries.len() as u64);
+    for (id, clock, json) in entries {
+        write_var(&mut out, *id);
+        write_var(&mut out, u64::from(*clock));
+        write_var(&mut out, json.len() as u64);
+        out.extend_from_slice(json.as_bytes());
+    }
+    out
 }
 
 fn collect_strings(v: &yrs::Any, out: &mut HashSet<String>) {
@@ -848,7 +902,9 @@ async fn connection(mut socket: WebSocket, app: Arc<App>) {
         };
         let failed = {
             let mut r = lock(&room);
-            let result = r.handle(&app, conn, &data);
+            // A malformed message must never take the server down: a panic inside a decoder only drops this connection.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.handle(&app, conn, &data)))
+                .unwrap_or_else(|_| Err("malformed message".into()));
             if result.is_err() {
                 if let Some(p) = r.peers.get(&conn) {
                     p.close();
@@ -883,4 +939,123 @@ async fn control_message(app: &App, out: &UnboundedSender<Out>, text: &str) {
         _ => return,
     };
     let _ = out.send(Out::Text(reply.to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> (Arc<App>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("egd-sync-test-{}", crate::util::random_token(6)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
+        db.create_project("p", "P");
+        let app = Arc::new(App {
+            db,
+            hub: Hub::default(),
+            sessions: Default::default(),
+            data_dir: dir.clone(),
+            server_id: "server-test".into(),
+            sync_addr: "127.0.0.1:1".parse().unwrap(),
+            admin_addr: "127.0.0.1:2".parse().unwrap(),
+            admin_tls: false,
+            restart_needed: Mutex::new(false),
+        });
+        (app, dir)
+    }
+
+    fn ready_peer(room: &mut Room, role: Role) -> (u64, tokio::sync::mpsc::UnboundedReceiver<Out>) {
+        let (tx, rx) = unbounded_channel();
+        let conn = room.peers.len() as u64 + 1;
+        room.peers.insert(
+            conn,
+            Peer {
+                tx,
+                key_hash: format!("h{conn}"),
+                device_id: format!("d{conn}"),
+                role,
+                name: String::new(),
+                project_id: "app".into(),
+                since: 0,
+                sent_welcome: true,
+                got_welcome: true,
+                ready: true,
+                clients: HashSet::new(),
+                strikes: 0,
+            },
+        );
+        (conn, rx)
+    }
+
+    /// A cheap fuzzer: random and mutated frames of every message type never panic or corrupt the room.
+    #[test]
+    fn garbage_never_panics() {
+        let (app, dir) = test_app();
+        let room = app.hub.room(&app, "p").unwrap();
+        let mut r = lock(&room);
+        let (conn, _rx) = ready_peer(&mut r, Role::Write);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Valid messages to mutate from.
+        let doc_update = {
+            use yrs::Map;
+            let d = Doc::new();
+            let m = d.get_or_insert_map("meta");
+            m.insert(&mut d.transact_mut(), "name", "x");
+            d.transact().encode_state_as_update_v1(&StateVector::default())
+        };
+        let seeds: Vec<Vec<u8>> = vec![
+            sync_frame(SyncMessage::Update(doc_update.clone())),
+            sync_frame(SyncMessage::SyncStep1(StateVector::default())),
+            frame(msg::AWARENESS, &[1, 5, 1, 4, b'n', b'u', b'l', b'l']),
+            chunk_frame("assets/images/0f8fad5b-d9cb-469f-a165-70867728950e.png", 0, 10, false, &[1, 2, 3]),
+            json_frame(msg::ASSET_REQUEST, &json!({ "path": "../../etc/passwd" })),
+            json_frame(msg::HELLO, &json!({ "protocol": 1, "schema": 1, "projectId": "app", "deviceId": "d1" })),
+        ];
+        for i in 0..20_000 {
+            let mut data = seeds[i % seeds.len()].clone();
+            match next() % 4 {
+                0 => {
+                    let n = (next() % 64) as usize;
+                    data = (0..n).map(|_| next() as u8).collect();
+                    if let Some(first) = data.first_mut() {
+                        *first %= 8;
+                    }
+                }
+                1 if data.len() > 1 => {
+                    let at = 1 + (next() as usize % (data.len() - 1));
+                    data[at] = next() as u8;
+                }
+                2 => data.truncate((next() as usize) % (data.len() + 1)),
+                _ => data.extend((0..(next() % 16)).map(|_| next() as u8)),
+            }
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.handle(&app, conn, &data)))
+                .expect("handle panicked");
+            if !r.peers.contains_key(&conn) {
+                let (_, rx) = ready_peer(&mut r, Role::Write);
+                std::mem::forget(rx);
+            }
+        }
+        drop(r);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn view_keys_cannot_upload_assets() {
+        let (app, dir) = test_app();
+        let room = app.hub.room(&app, "p").unwrap();
+        let mut r = lock(&room);
+        let (viewer, _rx) = ready_peer(&mut r, Role::View);
+        let path = "assets/images/0f8fad5b-d9cb-469f-a165-70867728950e.png";
+        // Unrequested chunks are ignored, whoever sends them.
+        r.handle(&app, viewer, &chunk_frame(path, 0, 3, false, &[1, 2, 3])).unwrap();
+        assert!(!r.asset_file(path).exists());
+        drop(r);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

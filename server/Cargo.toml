@@ -29,3 +29,12 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 default = []
 # Tray icon with a menu (open admin page, quit). Built for the Windows and macOS downloads.
 tray = ["dep:tray-icon", "dep:tao"]
+
+# yrs debug-asserts on client ids taken from the network; release builds clamp them instead.
+# Tests run like release here so the fuzz test checks what ships.
+[profile.dev.package.yrs]
+debug-assertions = false
+
+[profile.release]
+lto = "thin"
+strip = true
