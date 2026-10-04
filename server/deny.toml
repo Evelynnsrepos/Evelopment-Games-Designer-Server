@@ -5,6 +5,8 @@ yanked = "deny"
 ignore = [
   # smallstr is unmaintained (not a vulnerability). It only comes in through yrs; drop this once yrs replaces it.
   { id = "RUSTSEC-2026-0215", reason = "unmaintained, transitive via yrs, no known vulnerability" },
+  # proc-macro-error is unmaintained (not a vulnerability). It only comes in through gtk 0.18 for the optional "tray" feature on Linux.
+  { id = "RUSTSEC-2024-0370", reason = "unmaintained, build-time macro via gtk 0.18 (tray feature), no known vulnerability" },
 ]
 
 [licenses]
