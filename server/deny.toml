@@ -2,6 +2,10 @@
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # smallstr is unmaintained (not a vulnerability). It only comes in through yrs; drop this once yrs replaces it.
+  { id = "RUSTSEC-2026-0215", reason = "unmaintained, transitive via yrs, no known vulnerability" },
+]
 
 [licenses]
 version = 2
