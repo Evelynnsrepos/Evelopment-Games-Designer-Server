@@ -23,7 +23,7 @@ tao = { version = "0.37", optional = true }
 tokio = { version = "1.53.1", features = ["full"] }
 tray-icon = { version = "0.25", optional = true }
 yrs = "0.28.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
 [features]
 default = []
