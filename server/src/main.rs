@@ -4,6 +4,7 @@
 mod admin;
 mod autostart;
 mod backup;
+mod cli;
 mod db;
 mod gitsync;
 mod plugins;
@@ -55,6 +56,7 @@ Usage: egd-server [options]
   --data <folder>   Where projects and settings are kept (or EGD_DATA)
   --no-browser      Don't open the admin page on start
   --headless        No tray icon, even in the tray build
+  --no-admin-page   Don't serve the admin page at all (manage it with the commands below)
   --version         Print the version
 
   autostart on      Start the server when you log in (Linux: on the first connection)
@@ -63,7 +65,8 @@ Usage: egd-server [options]
 Environment: EGD_SYNC_ADDR, EGD_ADMIN_ADDR override the listen addresses
 (for Docker: EGD_ADMIN_ADDR=0.0.0.0:8475 and publish the port on 127.0.0.1 only).
 
-Open the admin page (default http://127.0.0.1:8475/admin) to set it up.";
+Open the admin page (default http://127.0.0.1:8475/admin) to set it up,
+or set it up and run it entirely from the command line (see below).";
 
 fn default_data_dir() -> PathBuf {
     let base = if cfg!(windows) {
@@ -81,7 +84,7 @@ fn default_data_dir() -> PathBuf {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("{HELP}");
+        println!("{HELP}\n\n{}", cli::HELP);
         return;
     }
     if args.iter().any(|a| a == "--version") {
@@ -95,8 +98,24 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("EGD_DATA").map(PathBuf::from))
         .unwrap_or_else(default_data_dir);
-    let open_browser = !args.iter().any(|a| a == "--no-browser") && std::env::var_os("EGD_DATA").is_none();
+    // The command, if any: what's left without the server's own options.
+    let command: Vec<String> = {
+        let mut skip_next = false;
+        args.iter()
+            .filter(|a| {
+                let keep = !skip_next && !["--data", "--no-browser", "--headless", "--no-admin-page"].contains(&a.as_str());
+                skip_next = !skip_next && a.as_str() == "--data";
+                keep
+            })
+            .cloned()
+            .collect()
+    };
+    if let Some(c) = command.first().filter(|c| !c.starts_with("--") && c.as_str() != "autostart" && !cli::COMMANDS.contains(&c.as_str())) {
+        fail(&format!("Unknown command: {c}. See `egd-server --help`."));
+    }
+    let open_browser = !args.iter().any(|a| a == "--no-browser") && std::env::var_os("EGD_DATA").is_none() && command.is_empty();
     let headless = args.iter().any(|a| a == "--headless");
+    let admin_page = !args.iter().any(|a| a == "--no-admin-page");
 
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         fail(&format!("Can't create the data folder {}: {e}", data_dir.display()));
@@ -117,8 +136,8 @@ fn main() {
         fail("The admin page may only be reached from other computers over TLS. Use the self-signed or certificate-file mode.");
     }
 
-    if args.first().map(String::as_str) == Some("autostart") {
-        let r = match args.get(1).map(String::as_str) {
+    if command.first().map(String::as_str) == Some("autostart") {
+        let r = match command.get(1).map(String::as_str) {
             Some("on") => autostart::turn_on(&data_dir, &sync_addr.to_string(), &admin_addr.to_string()),
             Some("off") => autostart::turn_off(),
             _ => Ok(format!("Autostart is {}. Use `egd-server autostart on` or `off`.", if autostart::is_on() { "on" } else { "off" })),
@@ -141,17 +160,23 @@ fn main() {
         admin_tls,
         restart_needed: Mutex::new(false),
     });
+    if !command.is_empty() {
+        if let Err(e) = cli::run(app, &command) {
+            fail(&e);
+        }
+        return;
+    }
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     #[cfg(feature = "tray")]
     if !headless {
         let a = app.clone();
-        std::thread::spawn(move || rt.block_on(run(a, open_browser)));
+        std::thread::spawn(move || rt.block_on(run(a, open_browser && admin_page, admin_page)));
         tray::run(app);
         return;
     }
     let _ = headless;
-    rt.block_on(run(app, open_browser));
+    rt.block_on(run(app, open_browser && admin_page, admin_page));
 }
 
 fn addr(env: &str, default: &str) -> SocketAddr {
@@ -164,31 +189,33 @@ fn fail(message: &str) -> ! {
     std::process::exit(1)
 }
 
-async fn run(app: Arc<App>, open_browser: bool) {
+async fn run(app: Arc<App>, open_browser: bool, admin_page: bool) {
     let sync_router = Router::new()
         .route("/", get(|| async { "Evelopment Games Designer server. Connect from the app with a connect code.\n" }))
         .route("/health", get(|| async { "ok" }))
         .route("/sync", get(sync::ws_handler))
         .with_state(app.clone());
 
-    let admin_listener = tls::listener(app.admin_addr, 1)
-        .and_then(|l| tokio::net::TcpListener::from_std(l).map_err(|e| e.to_string()))
-        .unwrap_or_else(|e| fail(&format!("Admin page {}: {e} (is the server already running?)", app.admin_addr)));
-    let admin = admin::router(app.clone());
-    let admin_app = app.clone();
-    tokio::spawn(async move {
-        let make = admin.into_make_service_with_connect_info::<SocketAddr>();
-        if admin_app.admin_tls {
-            let config = match tls::admin_config(&admin_app) {
-                Ok(c) => c,
-                Err(e) => fail(&format!("Admin page TLS: {e}")),
-            };
-            let std_listener = admin_listener.into_std().expect("listener");
-            let _ = axum_server::from_tcp_rustls(std_listener, config).expect("admin listener").serve(make).await;
-        } else {
-            let _ = axum::serve(admin_listener, make).await;
-        }
-    });
+    if admin_page {
+        let admin_listener = tls::listener(app.admin_addr, 1)
+            .and_then(|l| tokio::net::TcpListener::from_std(l).map_err(|e| e.to_string()))
+            .unwrap_or_else(|e| fail(&format!("Admin page {}: {e} (is the server already running?)", app.admin_addr)));
+        let admin = admin::router(app.clone());
+        let admin_app = app.clone();
+        tokio::spawn(async move {
+            let make = admin.into_make_service_with_connect_info::<SocketAddr>();
+            if admin_app.admin_tls {
+                let config = match tls::admin_config(&admin_app) {
+                    Ok(c) => c,
+                    Err(e) => fail(&format!("Admin page TLS: {e}")),
+                };
+                let std_listener = admin_listener.into_std().expect("listener");
+                let _ = axum_server::from_tcp_rustls(std_listener, config).expect("admin listener").serve(make).await;
+            } else {
+                let _ = axum::serve(admin_listener, make).await;
+            }
+        });
+    }
 
     let sync_app = app.clone();
     tokio::spawn(async move {
@@ -198,6 +225,7 @@ async fn run(app: Arc<App>, open_browser: bool) {
         }
     });
 
+    admin::forget_sessions_if_password_changed(&app);
     let ticker = app.clone();
     tokio::spawn(async move {
         let mut last_hourly = 0;
@@ -214,7 +242,9 @@ async fn run(app: Arc<App>, open_browser: bool) {
             }
             let a = ticker.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                a.hub.reconcile(&a);
                 a.hub.tick(&a);
+                admin::forget_sessions_if_password_changed(&a);
                 let t = util::now();
                 if t - last_hourly >= 3600 {
                     hourly(&a);
@@ -239,7 +269,7 @@ async fn run(app: Arc<App>, open_browser: bool) {
 
     println!("Evelopment Games Designer Server {}", env!("CARGO_PKG_VERSION"));
     println!("Data folder: {}", app.data_dir.display());
-    println!("Admin page:  {}", app.admin_url());
+    println!("Admin page:  {}", if admin_page { app.admin_url() } else { "off (--no-admin-page)".into() });
     println!("Apps connect to: {} ({})", admin::sync_url(&app), tls::mode(&app));
     if open_browser && app.db.get("admin_hash").is_none() {
         open_url(&app.admin_url());

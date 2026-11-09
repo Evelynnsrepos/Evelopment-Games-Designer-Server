@@ -33,6 +33,8 @@ pub struct Sessions {
     tokens: Mutex<HashMap<String, (String, i64)>>,
     /// Failed logins in a row and when the next try is allowed.
     fails: Mutex<(u32, i64)>,
+    /// The admin password hash this process last saw (changed from the command line?).
+    password: Mutex<Option<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -131,6 +133,33 @@ fn start_session(app: &App) -> Response {
     let secure = if app.admin_tls { "; Secure" } else { "" };
     let cookie = format!("{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age={SESSION_SECS}{secure}");
     ([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true, "csrf": csrf }))).into_response()
+}
+
+/// A logged-in session for `egd-server <command>`: (cookie token, CSRF token).
+pub fn cli_session(app: &App) -> (String, String) {
+    let (token, csrf) = (random_token(32), random_token(32));
+    lock(&app.sessions.tokens).insert(token.clone(), (csrf.clone(), now() + 3600));
+    (token, csrf)
+}
+
+pub const COOKIE_NAME: &str = COOKIE;
+
+/// The password was changed from the command line: log out every admin page session.
+pub fn forget_sessions_if_password_changed(app: &App) {
+    let hash = app.db.get("admin_hash").unwrap_or_default();
+    let mut seen = lock(&app.sessions.password);
+    if seen.as_deref().is_some_and(|h| !h.is_empty() && h != hash) {
+        lock(&app.sessions.tokens).clear();
+    }
+    *seen = Some(hash);
+}
+
+/// Set the admin password from the command line (whoever can run this owns the data folder anyway).
+pub fn set_password(app: &App, pw: &str) -> Result<(), String> {
+    check_password(pw)?;
+    app.db.set("admin_hash", &hash_password(pw));
+    app.db.audit("Changed the admin password (command line)");
+    Ok(())
 }
 
 // ---- passwords ------------------------------------------------------------------
@@ -603,9 +632,11 @@ async fn change_password(State(app): State<Arc<App>>, headers: HeaderMap, Json(p
         return Err(err(StatusCode::UNAUTHORIZED, "The current password is wrong."));
     }
     check_password(&p.next).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
-    app.db.set("admin_hash", &hash_password(&p.next));
+    let hash = hash_password(&p.next);
+    app.db.set("admin_hash", &hash);
     // Log out everywhere else.
     lock(&app.sessions.tokens).clear();
+    *lock(&app.sessions.password) = Some(hash);
     app.db.audit("Changed the admin password");
     Ok(start_session(&app))
 }

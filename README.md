@@ -75,6 +75,31 @@ A systemd unit is in [packaging/egd-server.service](packaging/egd-server.service
 Without nginx, choose **Public server with its own domain**: the server gets certificates from Let's Encrypt
 itself (it needs port 443 and a domain pointing at it).
 
+## Headless, command line only
+
+Everything the admin page does also works as a command, so a server without a screen or browser
+never needs the admin page. Commands work on the data folder whether the server runs or not;
+a running server picks changes up within a few seconds (closed or deleted projects, revoked keys, a new password).
+
+```bash
+echo 'a long admin password' | egd-server setup --mode proxy --name "Studio" --public-url wss://egd.example.com/sync
+egd-server project new "Moon Game"
+egd-server key new "Moon Game" Ana              # prints Ana's connect code (only once)
+egd-server key new "Moon Game" Ben --view --expires-days 30
+egd-server git set "Moon Game" git@github.com:studio/moon-game.git
+egd-server settings set dailyBackups=true idleStopMin=0
+egd-server --no-browser --headless --no-admin-page     # run it
+```
+
+`egd-server --help` lists every command: `status`, `projects`, `project new|rename|storage|close|reopen|delete|backup|restore`,
+`keys`, `key new|revoke`, `git`, `git set|off|sync`, `settings`, `settings set`, `password`, `plugins`, `plugin install|remove`,
+`backup`, `log`, `autostart on|off`. Add `--json` for machine-readable output. P is a project's name or id.
+The admin password is read from `EGD_ADMIN_PASSWORD` or the first line of stdin.
+`--no-admin-page` turns the admin page off completely.
+
+In Docker: `docker exec -i egd-server egd-server projects` (the image has `EGD_DATA` set and includes git for git sync).
+With the systemd unit: `sudo -u egd egd-server --data /var/lib/egd-server projects`.
+
 ## Docker
 
 ```bash
