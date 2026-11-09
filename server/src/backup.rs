@@ -24,7 +24,7 @@ pub fn project_zip(app: &App, id: &str) -> Result<Vec<u8>, String> {
     add("project.json", meta.to_string().as_bytes())?;
     add("state.bin", &state)?;
     let assets = app.project_dir(id).join("assets");
-    for kind in ["images", "audio"] {
+    for kind in ["images", "audio", "files"] {
         let Ok(entries) = std::fs::read_dir(assets.join(kind)) else { continue };
         for e in entries.filter_map(Result::ok) {
             let name = format!("assets/{kind}/{}", e.file_name().to_string_lossy());

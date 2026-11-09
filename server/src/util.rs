@@ -32,7 +32,7 @@ pub fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// Asset paths the app uses: `assets/<images|audio>/<uuid>.<ext>` (same rule as the app's ASSET_PATH).
+/// Asset paths the app uses: `assets/<images|audio|files>/<uuid>.<ext>`, ext 1-10 characters (same rule as the app's ASSET_PATH).
 pub fn is_asset_path(path: &str) -> bool {
     asset_path_at(path, 0) == Some(path.len())
 }
@@ -54,13 +54,13 @@ pub fn find_asset_paths(text: &str, out: &mut std::collections::HashSet<String>)
 /// If an asset path starts at `start`, where it ends.
 fn asset_path_at(text: &str, start: usize) -> Option<usize> {
     let rest = &text[start..];
-    let after = rest.strip_prefix("assets/images/").or_else(|| rest.strip_prefix("assets/audio/"))?;
+    let after = rest.strip_prefix("assets/images/").or_else(|| rest.strip_prefix("assets/audio/")).or_else(|| rest.strip_prefix("assets/files/"))?;
     let b = after.as_bytes();
     if b.len() < 38 || !b[..36].iter().all(|c| c.is_ascii_hexdigit() || *c == b'-') || b[36] != b'.' {
         return None;
     }
     let ext = b[37..].iter().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).count();
-    if !(1..=5).contains(&ext) {
+    if !(1..=10).contains(&ext) {
         return None;
     }
     // Don't accept a longer extension cut short (the app's regex is anchored).
@@ -79,7 +79,9 @@ mod tests {
         let id = "0f8fad5b-d9cb-469f-a165-70867728950e";
         assert!(is_asset_path(&format!("assets/images/{id}.png")));
         assert!(is_asset_path(&format!("assets/audio/{id}.mp3")));
-        assert!(!is_asset_path(&format!("assets/images/{id}.pngxyz")));
+        assert!(is_asset_path(&format!("assets/files/{id}.blend")));
+        assert!(is_asset_path(&format!("assets/files/{id}.aseprite")));
+        assert!(!is_asset_path(&format!("assets/files/{id}.abcdefghijk")));
         assert!(!is_asset_path(&format!("assets/other/{id}.png")));
         assert!(!is_asset_path(&format!("assets/images/../{id}.png")));
         assert!(!is_asset_path(&format!("assets/images/{id}.png/../../x")));
