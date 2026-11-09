@@ -442,7 +442,7 @@ struct NewKey {
 async fn create_key(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>, Json(k): Json<NewKey>) -> ApiResult {
     guard(&app, &headers, true)?;
     let p = project_or_404(&app, &id)?;
-    let role = Role::parse(&k.role).ok_or_else(|| err(StatusCode::BAD_REQUEST, "Pick view or write."))?;
+    let role = Role::parse(&k.role).ok_or_else(|| err(StatusCode::BAD_REQUEST, "Pick view, comment or write."))?;
     let label = clean_name(&k.label)?;
     let expires = k.expires_days.filter(|d| *d > 0).map(|d| now() + d.min(3650) * 86400);
     let key = format!("egd-key-{}", random_token(32));
