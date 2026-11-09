@@ -51,7 +51,11 @@ pub fn inspect(zip_bytes: &[u8]) -> Result<PluginInfo, String> {
         return Err("The plugin is larger than 20 MB.".into());
     }
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|_| "This is not a zip file.".to_string())?;
-    let names: Vec<String> = zip.file_names().map(String::from).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .map(|n| n.map(String::from))
+        .collect::<Result<_, _>>()
+        .map_err(|_| "The zip has a broken file name.".to_string())?;
     let manifest_name = names
         .iter()
         .filter(|n| n.ends_with("plugin.json") && n.matches('/').count() <= 1)

@@ -58,7 +58,7 @@ pub fn restore_project(app: &App, id: &str, zip_bytes: &[u8]) -> Result<(), Stri
     let _ = std::fs::remove_dir_all(&assets);
     for i in 0..z.len() {
         let mut f = z.by_index(i).map_err(|e| e.to_string())?;
-        let name = f.name().to_string();
+        let name = f.name().map_err(|e| e.to_string())?.to_string();
         // Only well-formed asset paths, so a crafted zip can't write anywhere else.
         if !is_asset_path(&name) {
             continue;

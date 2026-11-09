@@ -54,7 +54,10 @@ pub fn find_asset_paths(text: &str, out: &mut std::collections::HashSet<String>)
 /// If an asset path starts at `start`, where it ends.
 fn asset_path_at(text: &str, start: usize) -> Option<usize> {
     let rest = &text[start..];
-    let after = rest.strip_prefix("assets/images/").or_else(|| rest.strip_prefix("assets/audio/")).or_else(|| rest.strip_prefix("assets/files/"))?;
+    let after = rest
+        .strip_prefix("assets/images/")
+        .or_else(|| rest.strip_prefix("assets/audio/"))
+        .or_else(|| rest.strip_prefix("assets/files/"))?;
     let b = after.as_bytes();
     if b.len() < 38 || !b[..36].iter().all(|c| c.is_ascii_hexdigit() || *c == b'-') || b[36] != b'.' {
         return None;
