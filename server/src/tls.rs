@@ -92,22 +92,52 @@ pub fn admin_config(app: &App) -> Result<RustlsConfig, String> {
     Ok(RustlsConfig::from_config(config))
 }
 
+/// The listening socket: handed over by systemd when it started us on a connection
+/// (`egd-server autostart on` on Linux, fd 3 = sync, fd 4 = admin page), else bound here.
+pub fn listener(addr: SocketAddr, fd_index: i32) -> Result<std::net::TcpListener, String> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        let ours = std::env::var("LISTEN_PID").ok().and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id());
+        let count: i32 = std::env::var("LISTEN_FDS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        if ours && fd_index < count {
+            // SAFETY: systemd passes listening sockets as fds 3.. for this process (sd_listen_fds).
+            let l = unsafe { std::net::TcpListener::from_raw_fd(3 + fd_index) };
+            l.set_nonblocking(true).map_err(|e| e.to_string())?;
+            return Ok(l);
+        }
+    }
+    let _ = fd_index;
+    let l = std::net::TcpListener::bind(addr).map_err(|e| format!("{addr}: {e}"))?;
+    l.set_nonblocking(true).map_err(|e| e.to_string())?;
+    Ok(l)
+}
+
 pub async fn serve(app: Arc<App>, router: Router, addr: SocketAddr) -> Result<(), String> {
     let make = router.into_make_service_with_connect_info::<SocketAddr>();
+    let l = listener(addr, 0)?;
     match mode(&app).as_str() {
         "proxy" | "plain" => {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("{addr}: {e}"))?;
+            let listener = tokio::net::TcpListener::from_std(l).map_err(|e| format!("{addr}: {e}"))?;
             axum::serve(listener, make).await.map_err(|e| e.to_string())
         }
         "self-signed" => {
             let (config, _) = self_signed(&app)?;
-            axum_server::bind_rustls(addr, RustlsConfig::from_config(config)).serve(make).await.map_err(|e| e.to_string())
+            axum_server::from_tcp_rustls(l, RustlsConfig::from_config(config))
+                .map_err(|e| e.to_string())?
+                .serve(make)
+                .await
+                .map_err(|e| e.to_string())
         }
         "files" => {
             let cert = app.db.get("cert_path").ok_or("No certificate file is set.")?;
             let key = app.db.get("key_path").ok_or("No key file is set.")?;
             let config = load_pem(Path::new(&cert), Path::new(&key))?;
-            axum_server::bind_rustls(addr, RustlsConfig::from_config(config)).serve(make).await.map_err(|e| e.to_string())
+            axum_server::from_tcp_rustls(l, RustlsConfig::from_config(config))
+                .map_err(|e| e.to_string())?
+                .serve(make)
+                .await
+                .map_err(|e| e.to_string())
         }
         "acme" => {
             let domain = public_host(&app).ok_or("Set the public address (your domain) first.")?;
@@ -125,7 +155,7 @@ pub async fn serve(app: Arc<App>, router: Router, addr: SocketAddr) -> Result<()
                     }
                 }
             });
-            axum_server::bind(addr).acceptor(acceptor).serve(make).await.map_err(|e| e.to_string())
+            axum_server::from_tcp(l).map_err(|e| e.to_string())?.acceptor(acceptor).serve(make).await.map_err(|e| e.to_string())
         }
         other => Err(format!("Unknown TLS mode {other}")),
     }

@@ -80,6 +80,10 @@ impl Db {
         let _ = self.conn().execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", [k, v]);
     }
 
+    pub fn delete_setting(&self, k: &str) {
+        let _ = self.conn().execute("DELETE FROM settings WHERE k=?", [k]);
+    }
+
     // ---- projects -----------------------------------------------------------
 
     pub fn projects(&self) -> Vec<Project> {

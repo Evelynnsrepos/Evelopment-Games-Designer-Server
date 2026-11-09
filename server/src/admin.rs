@@ -8,7 +8,7 @@
 
 use crate::sync::{Role, dir_size};
 use crate::util::{b64, now, random_token, same};
-use crate::{App, backup, plugins, tls};
+use crate::{App, autostart, backup, gitsync, plugins, tls};
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
@@ -55,6 +55,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/admin/api/projects/{id}/keys", get(list_keys).post(create_key))
         .route("/admin/api/projects/{id}/backup", get(download_backup))
         .route("/admin/api/projects/{id}/restore", post(restore_backup))
+        .route("/admin/api/projects/{id}/git", post(set_git))
+        .route("/admin/api/projects/{id}/git/sync", post(git_sync_now))
         .route("/admin/api/keys/{hash}", axum::routing::delete(revoke_key))
         .route("/admin/api/settings", post(save_settings))
         .route("/admin/api/password", post(change_password))
@@ -332,6 +334,10 @@ fn settings_json(app: &App) -> Value {
         "fingerprint": tls::fingerprint(app),
         "syncAddr": app.sync_addr.to_string(),
         "dataDir": app.data_dir.to_string_lossy(),
+        "gitIntervalMin": app.db.get_or("git_interval_min", "10").parse::<i64>().unwrap_or(10),
+        "idleStopMin": app.db.get_or("idle_stop_min", "0").parse::<i64>().unwrap_or(0),
+        "autostart": autostart::is_on(),
+        "socketActivated": std::env::var_os("LISTEN_FDS").is_some(),
     })
 }
 
@@ -344,7 +350,7 @@ async fn overview(State(app): State<Arc<App>>, headers: HeaderMap) -> ApiResult 
         .map(|p| {
             let keys = app.db.keys(&p.id).len();
             let used = dir_size(&app.project_dir(&p.id).join("assets"));
-            json!({ "project": p, "keys": keys, "assetBytes": used })
+            json!({ "project": p, "keys": keys, "assetBytes": used, "git": gitsync::status_json(&app, &p.id) })
         })
         .collect();
     Ok(Json(json!({
@@ -421,6 +427,7 @@ async fn delete_project(State(app): State<Arc<App>>, headers: HeaderMap, Path(id
     app.hub.close_project(&app, &id);
     app.db.delete_project(&id);
     let _ = std::fs::remove_dir_all(app.project_dir(&id));
+    gitsync::forget(&app, &id);
     app.db.audit(&format!("Deleted project \"{}\"", p.name));
     Ok(Json(json!({ "ok": true })).into_response())
 }
@@ -474,6 +481,8 @@ struct SettingsEdit {
     daily_backups: Option<bool>,
     backup_dir: Option<String>,
     delete_unused_days: Option<i64>,
+    git_interval_min: Option<i64>,
+    idle_stop_min: Option<i64>,
 }
 
 async fn save_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(s): Json<SettingsEdit>) -> ApiResult {
@@ -504,6 +513,12 @@ async fn save_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(s):
             app.db.set(key, flag(v));
         }
     }
+    if let Some(m) = s.git_interval_min {
+        app.db.set("git_interval_min", &m.clamp(1, 1440).to_string());
+    }
+    if let Some(m) = s.idle_stop_min {
+        app.db.set("idle_stop_min", &m.clamp(0, 1440).to_string());
+    }
     if let Some(d) = s.delete_unused_days {
         app.db.set("delete_unused_days", &d.clamp(0, 36500).to_string());
     }
@@ -512,6 +527,68 @@ async fn save_settings(State(app): State<Arc<App>>, headers: HeaderMap, Json(s):
     }
     app.db.audit("Changed settings");
     Ok(Json(json!({ "ok": true, "restartNeeded": restart })).into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitEdit {
+    url: String,
+    branch: Option<String>,
+    #[serde(default)]
+    allow_public: bool,
+    /// The project's name, typed by the admin: needed to allow a public repository.
+    confirm_name: Option<String>,
+}
+
+/// A repository address git may get: no options, no helper programs, no passwords.
+pub fn check_git_url(url: &str) -> Result<(), &'static str> {
+    let u = url.trim();
+    if u.starts_with('-') || u.contains("::") || u.chars().any(char::is_control) || u.len() > 500 {
+        return Err("That is not a repository address.");
+    }
+    let lower = u.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        let authority = u.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+        if authority.rsplit_once('@').is_some_and(|(user, _)| user.contains(':')) {
+            return Err("Don't put a password or token in the address. Log in once with git on this computer instead.");
+        }
+    }
+    Ok(())
+}
+
+async fn set_git(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>, Json(g): Json<GitEdit>) -> ApiResult {
+    guard(&app, &headers, true)?;
+    let p = project_or_404(&app, &id)?;
+    let url = g.url.trim().to_string();
+    if url.is_empty() {
+        gitsync::forget(&app, &id);
+        app.db.audit(&format!("Turned off git sync of \"{}\"", p.name));
+        return Ok(Json(json!({ "ok": true })).into_response());
+    }
+    check_git_url(&url).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    let branch = g.branch.as_deref().map(str::trim).filter(|b| !b.is_empty()).unwrap_or("main");
+    if !gitsync::valid_branch(branch) {
+        return Err(err(StatusCode::BAD_REQUEST, "That branch name is not allowed."));
+    }
+    if g.allow_public && g.confirm_name.as_deref() != Some(p.name.as_str()) {
+        return Err(err(StatusCode::BAD_REQUEST, "Type the project's name to allow a public repository."));
+    }
+    gitsync::configure(&app, &id, &url, branch, g.allow_public);
+    app.db.audit(&format!("Turned on git sync of \"{}\"{}", p.name, if g.allow_public { " (public repository allowed)" } else { "" }));
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
+async fn git_sync_now(State(app): State<Arc<App>>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult {
+    guard(&app, &headers, true)?;
+    project_or_404(&app, &id)?;
+    let a = app.clone();
+    let r = tokio::task::spawn_blocking(move || gitsync::sync_project(&a, &id, true))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    match r {
+        Ok(changed) => Ok(Json(json!({ "ok": true, "changed": changed })).into_response()),
+        Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -625,5 +702,21 @@ mod tests {
         let id = new_project_id();
         assert_eq!(id.len(), 36);
         assert_eq!(&id[14..15], "4");
+    }
+}
+
+#[cfg(test)]
+mod git_url_tests {
+    #[test]
+    fn git_urls() {
+        use super::check_git_url as c;
+        assert!(c("git@github.com:me/game.git").is_ok());
+        assert!(c("https://github.com/me/game.git").is_ok());
+        assert!(c("https://me@gitea.lan/me/game.git").is_ok());
+        assert!(c("/home/me/backup.git").is_ok());
+        assert!(c("--upload-pack=touch /tmp/x").is_err());
+        assert!(c("ext::sh -c touch% /tmp/x").is_err());
+        assert!(c("https://me:ghp_secret@github.com/me/game.git").is_err());
+        assert!(c("https://github.com/a\nb").is_err());
     }
 }

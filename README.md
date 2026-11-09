@@ -22,9 +22,43 @@ Run it on your own PC, on a rented server (VPS), or behind nginx for a whole stu
    - the person who already has the project opens it, chooses **Work together → Or work through a server**, pastes their code and presses **Move to server**;
    - everyone else chooses **Join project** on the start screen and pastes their code.
 
-Teammates outside your home network need a port forward for port 8474 in your router, or use a VPS.
+Teammates outside your home network need a port forward for port 8474 in your router, or use a VPS,
+or [Tailscale](#on-your-own-pc-day-to-day) (no port forward).
 
 The Windows and macOS downloads show a tray icon (menu bar on macOS) with **Open admin page**, **Open data folder** and **Stop server**.
+
+## On your own PC, day to day
+
+You don't need a server that is always on. The server can start and stop by itself:
+
+```bash
+egd-server autostart on     # once; `egd-server autostart off` undoes it
+```
+
+- **Linux:** a systemd user socket holds the ports and starts the server on the first connection (and so also right after login).
+  With **Settings → Stop when nobody was connected for N minutes**, it stops when idle and starts again when someone connects.
+  Stop a copy you started by hand first, so the ports are free. User services stop when you log out; `loginctl enable-linger $USER` keeps them.
+- **macOS / Windows:** it starts when you log in. Idle it uses almost nothing (projects are unloaded when nobody is connected).
+  Idle stop works too, but then it only comes back at the next login or when you start it.
+- **Before it stops** (idle stop, Ctrl+C, the tray's Stop server, the PC shutting down) it saves every project and pushes the last changes to git.
+- **From outside your home network** without a port forward or VPS: install [Tailscale](https://tailscale.com) (free for personal use) on this PC
+  and on your teammates' devices, choose **On this computer or in my home network** in the wizard, and enter the PC's Tailscale name as the address.
+- When the PC is off, everyone keeps working in the app; it syncs when the server is back.
+
+## Git sync
+
+The server can keep a git history of each project in the background (**Projects → Git sync**).
+
+- It writes the project as the **normal project folder** the app saves (`project.json`, `entities/`, `components/`, `assets/`)
+  and pushes it every 10 minutes when something changed (Settings), when the server stops, and on **Sync now**.
+  Clone the repository and open the folder in the app to get a copy. Sketch drawings stay on each computer, as in the app.
+- **Push only.** It never pulls and never forces: if someone else pushed to the branch, it stops and says so.
+  Use one repository per project, and don't also turn on the app's Git backup for the same repository.
+- It uses the **git installed on this computer and its login** (SSH key, Git Credential Manager, a saved login).
+  Log in once with git as the user the server runs as. The server stores no password or token; addresses with one are refused.
+- **Private repositories only.** Before every push it checks that the repository can't be read without a login.
+  A public repository needs **Allow a public repository**, a red warning and typing the project's name, and shows a red **Public** tag.
+- Files over 100 MB stop the push (GitHub refuses them).
 
 ## On a VPS behind nginx
 
@@ -55,6 +89,7 @@ The admin port is published on 127.0.0.1 only. See [packaging/docker-compose.yml
 
 ```
 egd-server [--data <folder>] [--no-browser] [--headless] [--version]
+egd-server autostart on|off      # start when you log in (Linux: on the first connection)
 ```
 
 | | |

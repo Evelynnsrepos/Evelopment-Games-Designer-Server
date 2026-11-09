@@ -939,25 +939,29 @@ async fn control_message(app: &App, out: &UnboundedSender<Out>, text: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_app() -> (Arc<App>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("egd-sync-test-{}", crate::util::random_token(6)));
-        std::fs::create_dir_all(&dir).unwrap();
+    pub(crate) fn test_app_in(dir: &std::path::Path) -> Arc<App> {
+        std::fs::create_dir_all(dir).unwrap();
         let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
-        db.create_project("p", "P");
-        let app = Arc::new(App {
+        Arc::new(App {
             db,
             hub: Hub::default(),
             sessions: Default::default(),
-            data_dir: dir.clone(),
+            data_dir: dir.to_path_buf(),
             server_id: "server-test".into(),
             sync_addr: "127.0.0.1:1".parse().unwrap(),
             admin_addr: "127.0.0.1:2".parse().unwrap(),
             admin_tls: false,
             restart_needed: Mutex::new(false),
-        });
+        })
+    }
+
+    fn test_app() -> (Arc<App>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("egd-sync-test-{}", crate::util::random_token(6)));
+        let app = test_app_in(&dir);
+        app.db.create_project("p", "P");
         (app, dir)
     }
 

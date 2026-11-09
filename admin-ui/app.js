@@ -231,12 +231,13 @@ async function projects() {
       projects()
     }) }, 'New project')),
   )
-  const cards = o.projects.map(({ project: p, keys, assetBytes }) => projectCard(p, keys, assetBytes))
+  const cards = o.projects.map(({ project: p, keys, assetBytes, git }) => projectCard(p, keys, assetBytes, git))
   page(create, ...(cards.length ? cards : [h('p', { class: 'muted' }, 'No projects yet.')]))
 }
 
-function projectCard(p, keyCount, assetBytes) {
+function projectCard(p, keyCount, assetBytes, git) {
   const keysBox = h('div')
+  const gitBox = h('div')
   const restoreInput = h('input', { type: 'file', accept: '.zip', hidden: true, onchange: action(async () => {
     const file = restoreInput.files[0]
     if (!file) return
@@ -245,10 +246,14 @@ function projectCard(p, keyCount, assetBytes) {
     projects()
   }) })
   return h('div', { class: 'card' },
-    h('h3', { style: null }, p.name, ' ', p.archived ? h('span', { class: 'tag' }, 'closed') : null),
+    h('h3', { style: null }, p.name, ' ', p.archived ? h('span', { class: 'tag' }, 'closed') : null,
+      git.url ? [' ', h('span', { class: 'tag' }, 'git sync')] : null,
+      git.url && git.allowPublic ? [' ', h('span', { class: 'tag public' }, 'Public')] : null),
+    git.error ? h('p', { class: 'error small' }, 'Git sync: ', git.error) : null,
     h('p', { class: 'small muted' }, `${keyCount} key${keyCount === 1 ? '' : 's'} · files ${bytes(assetBytes)} of ${p.quotaMb} MB · last used ${when(p.lastUsed)}`),
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: action(() => showKeys(p, keysBox)) }, 'Keys'),
+      h('button', { class: 'btn', onclick: () => showGit(p, git, gitBox) }, 'Git sync'),
       h('button', { class: 'btn', onclick: action(async () => {
         const n = prompt('New name', p.name)
         if (n) await api('POST', `projects/${p.id}`, { name: n })
@@ -276,7 +281,48 @@ function projectCard(p, keyCount, assetBytes) {
       }) }, 'Delete'),
     ),
     keysBox,
+    gitBox,
   )
+}
+
+function showGit(p, git, box) {
+  const url = h('input', { type: 'text', value: git.url, placeholder: 'git@github.com:you/your-game.git' })
+  const branch = h('input', { type: 'text', value: git.branch, class: 'narrow' })
+  const pub = h('input', { type: 'checkbox', checked: git.allowPublic })
+  box.replaceChildren(h('div', null,
+    h('h3', null, 'Git sync'),
+    h('p', { class: 'small muted' }, 'The server saves this project as a normal project folder (the same files the app saves) and pushes it to the repository every few minutes when something changed, and when the server stops. It only pushes, never pulls, and never overwrites changes someone else pushed. Clone the repository and open it in the app to get a copy.'),
+    h('p', { class: 'small muted' }, 'It uses the git installed on this computer and its login (SSH key or saved login). Log in once with git in a terminal as the user the server runs as. Don’t put a password or token into the address.'),
+    h('p', { class: 'small muted' }, 'Turn off “Git backup” in the app for this project, or use another repository: two copies pushing to the same place refuse each other.'),
+    h('label', null, 'Repository address (private)', url),
+    h('label', null, 'Branch', branch),
+    h('label', { class: 'inline' }, pub, 'Allow a public repository (not recommended)'),
+    git.allowPublic ? h('p', { class: 'warn' }, 'Public: anyone on the internet can read this project, including unreleased story and art.') : null,
+    git.lastSync ? h('p', { class: 'small muted' }, `Last pushed ${when(git.lastSync)}`) : null,
+    git.error ? h('p', { class: 'error' }, git.error) : null,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', onclick: action(async () => {
+        let confirmName
+        if (pub.checked && !git.allowPublic) {
+          const ok = await confirmDialog('Allow a public repository?', `Anyone on the internet could read “${p.name}”: every document, every picture, unreleased story and art. Use a private repository instead whenever you can.`, 'Allow public', { danger: true, typeToConfirm: p.name })
+          if (!ok) return
+          confirmName = p.name
+        } else if (pub.checked) confirmName = p.name
+        await api('POST', `projects/${p.id}/git`, { url: url.value, branch: branch.value, allowPublic: pub.checked, confirmName })
+        projects()
+      }) }, 'Save'),
+      git.url ? h('button', { class: 'btn', onclick: action(async (e) => {
+        const card = e.currentTarget.closest('.card')
+        const r = await api('POST', `projects/${p.id}/git/sync`)
+        card.append(h('p', null, r.changed ? 'Pushed.' : 'Nothing new to push.'))
+      }) }, 'Sync now') : null,
+      git.url ? h('button', { class: 'btn danger', onclick: action(async () => {
+        if (!(await confirmDialog('Turn off git sync?', 'The server stops pushing this project. The repository and its history stay as they are.', 'Turn off'))) return
+        await api('POST', `projects/${p.id}/git`, { url: '' })
+        projects()
+      }) }, 'Turn off') : null,
+    ),
+  ))
 }
 
 async function showKeys(p, box) {
@@ -411,6 +457,8 @@ async function settings() {
   const email = h('input', { type: 'email', value: s.acmeEmail })
   const trust = h('input', { type: 'checkbox', checked: s.trustProxy })
   const unused = h('input', { type: 'number', min: 0, value: s.deleteUnusedDays, class: 'narrow' })
+  const idle = h('input', { type: 'number', min: 0, value: s.idleStopMin, class: 'narrow' })
+  const gitEvery = h('input', { type: 'number', min: 1, value: s.gitIntervalMin, class: 'narrow' })
   const modeBox = h('div', null, modeChoices(s.mode))
   const pwCurrent = h('input', { type: 'password', autocomplete: 'current-password' })
   const pwNext = h('input', { type: 'password', autocomplete: 'new-password' })
@@ -430,10 +478,18 @@ async function settings() {
       s.mode === 'proxy' ? [h('h3', null, 'nginx config'), h('textarea', { readonly: true, rows: 18 }, nginxConfig(s))] : null,
       h('h3', null, 'Keeping data'),
       h('label', null, 'Delete projects nobody opened for this many days (0 = never)', unused),
+      h('h3', null, 'On a normal PC'),
+      h('p', { class: 'small muted' }, s.autostart
+        ? 'Starts by itself: on. ' + (s.socketActivated ? 'This computer starts the server on the first connection, so it can stop when idle and comes back when someone connects.' : 'It starts when you log in.')
+        : 'Starts by itself: off. To start the server when you log in (on Linux: on the first connection), run ', s.autostart ? null : h('code', null, 'egd-server autostart on'), s.autostart ? null : ' once.'),
+      h('label', null, 'Stop when nobody was connected for this many minutes (0 = keep running)', idle),
+      h('p', { class: 'small muted' }, 'Projects are saved and pushed to git before it stops. On Windows and macOS it only starts again at the next login or by hand.'),
+      h('label', null, 'Push projects with git sync every this many minutes', gitEvery),
       h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: action(async () => {
         const r = await api('POST', 'settings', {
           serverName: name.value, mode: document.querySelector('input[name=mode]:checked').value, publicUrl: url.value,
           certPath: cert.value, keyPath: key.value, acmeEmail: email.value, trustProxy: trust.checked, deleteUnusedDays: Number(unused.value || 0),
+          idleStopMin: Number(idle.value || 0), gitIntervalMin: Number(gitEvery.value || 10),
         })
         $('#server-name').textContent = name.value
         settings()

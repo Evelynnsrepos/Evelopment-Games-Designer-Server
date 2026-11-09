@@ -2,8 +2,10 @@
 #![cfg_attr(all(windows, feature = "tray", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod admin;
+mod autostart;
 mod backup;
 mod db;
+mod gitsync;
 mod plugins;
 mod sync;
 mod tls;
@@ -54,6 +56,9 @@ Usage: egd-server [options]
   --no-browser      Don't open the admin page on start
   --headless        No tray icon, even in the tray build
   --version         Print the version
+
+  autostart on      Start the server when you log in (Linux: on the first connection)
+  autostart off     Stop doing that
 
 Environment: EGD_SYNC_ADDR, EGD_ADMIN_ADDR override the listen addresses
 (for Docker: EGD_ADMIN_ADDR=0.0.0.0:8475 and publish the port on 127.0.0.1 only).
@@ -112,6 +117,19 @@ fn main() {
         fail("The admin page may only be reached from other computers over TLS. Use the self-signed or certificate-file mode.");
     }
 
+    if args.first().map(String::as_str) == Some("autostart") {
+        let r = match args.get(1).map(String::as_str) {
+            Some("on") => autostart::turn_on(&data_dir, &sync_addr.to_string(), &admin_addr.to_string()),
+            Some("off") => autostart::turn_off(),
+            _ => Ok(format!("Autostart is {}. Use `egd-server autostart on` or `off`.", if autostart::is_on() { "on" } else { "off" })),
+        };
+        match r {
+            Ok(text) => println!("{text}"),
+            Err(e) => fail(&e),
+        }
+        return;
+    }
+
     let app = Arc::new(App {
         db,
         hub: sync::Hub::default(),
@@ -153,8 +171,8 @@ async fn run(app: Arc<App>, open_browser: bool) {
         .route("/sync", get(sync::ws_handler))
         .with_state(app.clone());
 
-    let admin_listener = tokio::net::TcpListener::bind(app.admin_addr)
-        .await
+    let admin_listener = tls::listener(app.admin_addr, 1)
+        .and_then(|l| tokio::net::TcpListener::from_std(l).map_err(|e| e.to_string()))
         .unwrap_or_else(|e| fail(&format!("Admin page {}: {e} (is the server already running?)", app.admin_addr)));
     let admin = admin::router(app.clone());
     let admin_app = app.clone();
@@ -183,8 +201,17 @@ async fn run(app: Arc<App>, open_browser: bool) {
     let ticker = app.clone();
     tokio::spawn(async move {
         let mut last_hourly = 0;
+        let mut last_busy = util::now();
         loop {
             tokio::time::sleep(Duration::from_secs(3)).await;
+            // Stop when nobody was connected for a while (Settings); systemd starts it again on the next connection.
+            let idle_min: i64 = ticker.db.get_or("idle_stop_min", "0").parse().unwrap_or(0);
+            if !ticker.hub.connected().is_empty() {
+                last_busy = util::now();
+            } else if idle_min > 0 && util::now() - last_busy >= idle_min * 60 {
+                println!("Nobody connected for {idle_min} min, stopping.");
+                STOP.notify_one();
+            }
             let a = ticker.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 a.hub.tick(&a);
@@ -200,6 +227,16 @@ async fn run(app: Arc<App>, open_browser: bool) {
         }
     });
 
+    let git = app.clone();
+    tokio::spawn(async move {
+        loop {
+            let minutes: u64 = git.db.get_or("git_interval_min", "10").parse().unwrap_or(10);
+            tokio::time::sleep(Duration::from_secs(minutes.max(1) * 60)).await;
+            let a = git.clone();
+            let _ = tokio::task::spawn_blocking(move || gitsync::sync_all(&a)).await;
+        }
+    });
+
     println!("Evelopment Games Designer Server {}", env!("CARGO_PKG_VERSION"));
     println!("Data folder: {}", app.data_dir.display());
     println!("Admin page:  {}", app.admin_url());
@@ -210,7 +247,17 @@ async fn run(app: Arc<App>, open_browser: bool) {
 
     shutdown_signal().await;
     println!("Saving and stopping…");
-    app.hub.save_all(&app);
+    stop(&app);
+}
+
+/// Idle stop, from the ticker.
+static STOP: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Save every project and push the last changes to git, then exit (also from the tray).
+pub fn stop(app: &App) -> ! {
+    app.hub.save_all(app);
+    gitsync::sync_all(app);
+    std::process::exit(0)
 }
 
 /// Ctrl+C, or SIGTERM (Docker, systemd).
@@ -221,10 +268,14 @@ async fn shutdown_signal() {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}
+            _ = STOP.notified() => {}
         }
     }
     #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = STOP.notified() => {}
+    }
 }
 
 /// Expired keys, optional auto-delete of unused projects, daily backups.
