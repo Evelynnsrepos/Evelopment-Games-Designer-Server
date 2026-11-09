@@ -7,7 +7,7 @@ COPY admin-ui admin-ui
 RUN cd server && cargo build --release --locked
 
 FROM debian:stable-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git openssh-client && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --home /data egd && mkdir /data && chown egd /data
 COPY --from=build /src/server/target/release/egd-server /usr/local/bin/egd-server
 USER egd

@@ -36,9 +36,8 @@ pub fn run(app: Arc<App>) {
             } else if e.id == folder.id() {
                 open_url(&app.data_dir.to_string_lossy());
             } else if e.id == quit.id() {
-                app.hub.save_all(&app);
                 tray.take();
-                std::process::exit(0);
+                crate::stop(&app);
             }
         }
     });

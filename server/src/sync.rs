@@ -363,6 +363,29 @@ impl Hub {
         }
     }
 
+    /// Apply changes made by `egd-server <command>` from another process: closed or deleted
+    /// projects, renamed ones, revoked keys. Runs every few seconds.
+    pub fn reconcile(&self, app: &App) {
+        let ids: Vec<String> = lock(&self.rooms).keys().cloned().collect();
+        for id in ids {
+            match app.db.project(&id) {
+                Some(p) if !p.archived => self.refresh_project(app, &id),
+                _ => {
+                    self.close_project(app, &id);
+                    continue;
+                }
+            }
+            let gone: Vec<String> = {
+                let Some(room) = lock(&self.rooms).get(&id).cloned() else { continue };
+                let r = lock(&room);
+                r.peers.values().map(|p| p.key_hash.clone()).filter(|h| app.db.key_by_hash(h).is_none()).collect()
+            };
+            for h in gone {
+                self.kick_key(&h);
+            }
+        }
+    }
+
     /// Save everything (on shutdown).
     pub fn save_all(&self, app: &App) {
         let rooms: Vec<_> = lock(&self.rooms).values().cloned().collect();
@@ -1008,25 +1031,29 @@ async fn control_message(app: &App, out: &UnboundedSender<Out>, text: &str) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn test_app() -> (Arc<App>, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("egd-sync-test-{}", crate::util::random_token(6)));
-        std::fs::create_dir_all(&dir).unwrap();
+    pub(crate) fn test_app_in(dir: &std::path::Path) -> Arc<App> {
+        std::fs::create_dir_all(dir).unwrap();
         let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
-        db.create_project("p", "P");
-        let app = Arc::new(App {
+        Arc::new(App {
             db,
             hub: Hub::default(),
             sessions: Default::default(),
-            data_dir: dir.clone(),
+            data_dir: dir.to_path_buf(),
             server_id: "server-test".into(),
             sync_addr: "127.0.0.1:1".parse().unwrap(),
             admin_addr: "127.0.0.1:2".parse().unwrap(),
             admin_tls: false,
             restart_needed: Mutex::new(false),
-        });
+        })
+    }
+
+    fn test_app() -> (Arc<App>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("egd-sync-test-{}", crate::util::random_token(6)));
+        let app = test_app_in(&dir);
+        app.db.create_project("p", "P");
         (app, dir)
     }
 
@@ -1216,6 +1243,34 @@ mod tests {
         r.handle(&app, c, &sync_frame(SyncMessage::Update(review))).unwrap();
         assert!(r.doc.transact().get_map("doc:reviews/reviews").is_some());
         drop(r);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Changes made by `egd-server <command>` in another process reach the running server.
+    #[test]
+    fn reconcile_applies_command_line_changes() {
+        let (app, dir) = test_app();
+        app.db.add_key("k1", "p", "write", "Ana", None);
+        let room = app.hub.room(&app, "p").unwrap();
+        let (mut kept, mut revoked) = {
+            let mut r = lock(&room);
+            let (a, rx1) = ready_peer(&mut r, Role::Write);
+            r.peers.get_mut(&a).unwrap().key_hash = crate::util::sha256_hex(b"k1");
+            let (_, rx2) = ready_peer(&mut r, Role::Write);
+            (rx1, rx2)
+        };
+        app.db.update_project("p", Some("Renamed"), None, None);
+        app.hub.reconcile(&app);
+        assert!(kept.try_recv().is_err(), "a valid key stays connected");
+        let mut closed = false;
+        while let Ok(m) = revoked.try_recv() {
+            closed |= matches!(m, Out::Close);
+        }
+        assert!(closed, "a key deleted elsewhere is disconnected");
+        assert_eq!(lock(&room).name, "Renamed");
+        app.db.update_project("p", None, None, Some(true));
+        app.hub.reconcile(&app);
+        assert!(lock(&app.hub.rooms).is_empty(), "a closed project is closed here too");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

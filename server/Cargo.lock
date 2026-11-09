@@ -804,6 +804,7 @@ dependencies = [
  "sha2",
  "tao",
  "tokio",
+ "tower",
  "tray-icon",
  "yrs",
  "zip",

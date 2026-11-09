@@ -22,9 +22,43 @@ Run it on your own PC, on a rented server (VPS), or behind nginx for a whole stu
    - the person who already has the project opens it, chooses **Work together → Or work through a server**, pastes their code and presses **Move to server**;
    - everyone else chooses **Join project** on the start screen and pastes their code.
 
-Teammates outside your home network need a port forward for port 8474 in your router, or use a VPS.
+Teammates outside your home network need a port forward for port 8474 in your router, or use a VPS,
+or [Tailscale](#on-your-own-pc-day-to-day) (no port forward).
 
 The Windows and macOS downloads show a tray icon (menu bar on macOS) with **Open admin page**, **Open data folder** and **Stop server**.
+
+## On your own PC, day to day
+
+You don't need a server that is always on. The server can start and stop by itself:
+
+```bash
+egd-server autostart on     # once; `egd-server autostart off` undoes it
+```
+
+- **Linux:** a systemd user socket holds the ports and starts the server on the first connection (and so also right after login).
+  With **Settings → Stop when nobody was connected for N minutes**, it stops when idle and starts again when someone connects.
+  Stop a copy you started by hand first, so the ports are free. User services stop when you log out; `loginctl enable-linger $USER` keeps them.
+- **macOS / Windows:** it starts when you log in. Idle it uses almost nothing (projects are unloaded when nobody is connected).
+  Idle stop works too, but then it only comes back at the next login or when you start it.
+- **Before it stops** (idle stop, Ctrl+C, the tray's Stop server, the PC shutting down) it saves every project and pushes the last changes to git.
+- **From outside your home network** without a port forward or VPS: install [Tailscale](https://tailscale.com) (free for personal use) on this PC
+  and on your teammates' devices, choose **On this computer or in my home network** in the wizard, and enter the PC's Tailscale name as the address.
+- When the PC is off, everyone keeps working in the app; it syncs when the server is back.
+
+## Git sync
+
+The server can keep a git history of each project in the background (**Projects → Git sync**).
+
+- It writes the project as the **normal project folder** the app saves (`project.json`, `entities/`, `components/`, `assets/`)
+  and pushes it every 10 minutes when something changed (Settings), when the server stops, and on **Sync now**.
+  Clone the repository and open the folder in the app to get a copy. Sketch drawings stay on each computer, as in the app.
+- **Push only.** It never pulls and never forces: if someone else pushed to the branch, it stops and says so.
+  Use one repository per project, and don't also turn on the app's Git backup for the same repository.
+- It uses the **git installed on this computer and its login** (SSH key, Git Credential Manager, a saved login).
+  Log in once with git as the user the server runs as. The server stores no password or token; addresses with one are refused.
+- **Private repositories only.** Before every push it checks that the repository can't be read without a login.
+  A public repository needs **Allow a public repository**, a red warning and typing the project's name, and shows a red **Public** tag.
+- Files over 100 MB stop the push (GitHub refuses them).
 
 ## On a VPS behind nginx
 
@@ -41,6 +75,31 @@ A systemd unit is in [packaging/egd-server.service](packaging/egd-server.service
 Without nginx, choose **Public server with its own domain**: the server gets certificates from Let's Encrypt
 itself (it needs port 443 and a domain pointing at it).
 
+## Headless, command line only
+
+Everything the admin page does also works as a command, so a server without a screen or browser
+never needs the admin page. Commands work on the data folder whether the server runs or not;
+a running server picks changes up within a few seconds (closed or deleted projects, revoked keys, a new password).
+
+```bash
+echo 'a long admin password' | egd-server setup --mode proxy --name "Studio" --public-url wss://egd.example.com/sync
+egd-server project new "Moon Game"
+egd-server key new "Moon Game" Ana              # prints Ana's connect code (only once)
+egd-server key new "Moon Game" Ben --view --expires-days 30
+egd-server git set "Moon Game" git@github.com:studio/moon-game.git
+egd-server settings set dailyBackups=true idleStopMin=0
+egd-server --no-browser --headless --no-admin-page     # run it
+```
+
+`egd-server --help` lists every command: `status`, `projects`, `project new|rename|storage|close|reopen|delete|backup|restore`,
+`keys`, `key new|revoke`, `git`, `git set|off|sync`, `settings`, `settings set`, `password`, `plugins`, `plugin install|remove`,
+`backup`, `log`, `autostart on|off`. Add `--json` for machine-readable output. P is a project's name or id.
+The admin password is read from `EGD_ADMIN_PASSWORD` or the first line of stdin.
+`--no-admin-page` turns the admin page off completely.
+
+In Docker: `docker exec -i egd-server egd-server projects` (the image has `EGD_DATA` set and includes git for git sync).
+With the systemd unit: `sudo -u egd egd-server --data /var/lib/egd-server projects`.
+
 ## Docker
 
 ```bash
@@ -55,6 +114,7 @@ The admin port is published on 127.0.0.1 only. See [packaging/docker-compose.yml
 
 ```
 egd-server [--data <folder>] [--no-browser] [--headless] [--version]
+egd-server autostart on|off      # start when you log in (Linux: on the first connection)
 ```
 
 | | |
