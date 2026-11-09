@@ -4,7 +4,7 @@ A small sync server for [Evelopment Games Designer](https://github.com/Evelynnsr
 Projects are shared through the server, so people sync even if they are never online at the same time.
 Run it on your own PC, on a rented server (VPS), or behind nginx for a whole studio.
 
-- **No accounts.** The admin makes a **key** per person (view or edit) and sends them a **connect code**.
+- **No accounts.** The admin makes a **key** per person (view, comment or edit) and sends them a **connect code**.
   Everyone types their own name in the app. Names are not checked.
 - **One program.** No database server, no web server needed. Settings live in a web page on the server itself.
 - **Private by default.** No IP addresses in logs, no tracking, no cookies except the admin login,
@@ -81,6 +81,7 @@ It is an always-on member of each project: it keeps the project's [Yjs](https://
 relays edits and presence, and stores images and audio. The app's peer-to-peer mode keeps working as before.
 
 - A **view** key can read and see who is online. The server drops any change it sends and disconnects it if it keeps trying.
+- A **comment** key can read everything and write review comments and statuses, nothing else. The server tries each change on a copy of the project first and drops anything outside the Reviews document.
 - **Revoking** a key disconnects it at once. **Closing** a project disconnects everyone; they can keep a local copy.
 - The server is the host: only the admin removes people or closes a project.
 - Limits: 8 MiB per message, 200 MB per file, a storage quota per project (2 GB by default), 5 connections per key, 30 per IP address.
@@ -98,7 +99,7 @@ so a server admin should only offer plugins they trust completely.
 Whoever runs the server is responsible for the data in it (the *controller* under the GDPR). It stores:
 
 - project content, until the project is deleted (optionally after N days unused);
-- per key: a hash of the key, its label, view/edit, expiry, and the last name typed with it; deleted with the key;
+- per key: a hash of the key, its label, view/comment/edit, expiry, and the last name typed with it; deleted with the key;
 - an admin log (what was done on the admin page, no IP addresses), 90 days;
 - backups, 14 days.
 

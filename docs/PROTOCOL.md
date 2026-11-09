@@ -25,7 +25,7 @@ The code is personal. The app keeps it in the project's `collab/server.json`, ne
    - `{"type":"auth-ok","serverId","serverName","projectId","serverProjectId","projectName","role","empty"}`
      - `projectId` is the **app's** id for the project (its meta id), or `null` while the server project is empty.
        The first change uploaded binds the server project to the uploader's project id; hellos with another id are rejected with `project`.
-     - `role` is `view` or `write`. `empty` is true while nothing has been uploaded.
+     - `role` is `view`, `comment` or `write`. A `comment` connection's updates are only kept when they change nothing but the Reviews document (`doc:reviews/reviews` and its `text:doc:reviews/reviews#…` texts); the server checks each one on a copy of the project. `empty` is true while nothing has been uploaded.
    - or `{"type":"auth-error","reason"}` with `bad-key` (unknown or revoked), `expired`, `closed` (project closed), `busy` (too many connections for this key), `bad-request`, and the connection closes.
 3. From then on, **binary** messages are protocol v1 frames (`[type u8][payload]`), unchanged:
    hello, welcome, reject, Yjs sync, awareness, asset request, asset chunk, closed.

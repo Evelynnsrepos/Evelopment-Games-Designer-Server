@@ -282,7 +282,7 @@ function projectCard(p, keyCount, assetBytes) {
 async function showKeys(p, box) {
   const keys = await api('GET', `projects/${p.id}/keys`)
   const label = h('input', { type: 'text', placeholder: 'Who is it for? e.g. Ana', maxlength: 120 })
-  const role = h('select', null, h('option', { value: 'write' }, 'Can edit (write)'), h('option', { value: 'view' }, 'Can only look (view)'))
+  const role = h('select', null, h('option', { value: 'write' }, 'Can edit (write)'), h('option', { value: 'comment' }, 'Can look and comment (comment)'), h('option', { value: 'view' }, 'Can only look (view)'))
   const days = h('input', { type: 'number', min: 0, placeholder: 'never', class: 'narrow' })
   box.replaceChildren(
     h('h3', null, 'Keys'),
@@ -525,7 +525,7 @@ ${operator}
 
 2. What is processed and why
 - Project content you create in Evelopment Games Designer (text, images, audio), to sync it with your team.
-- Your access key: the server stores only a hash of it, its label, its access (view/write) and an expiry date.
+- Your access key: the server stores only a hash of it, its label, its access (view/comment/write) and an expiry date.
 - The name you type in the app (self-chosen, not verified), so your team sees who is working. Only the last name used with each key is stored.
 - Your IP address is held in memory only while you are connected, to limit abuse (connection limits). It is never stored or logged.
 Legal basis: Art. 6(1)(b) GDPR (providing the shared project work) and Art. 6(1)(f) (secure operation).

@@ -53,6 +53,8 @@ const PARALLEL_ASSET_REQUESTS: usize = 3;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     View,
+    /// Reads everything, may only change the Reviews document (comments and review status).
+    Comment,
     Write,
 }
 
@@ -60,6 +62,7 @@ impl Role {
     pub fn parse(s: &str) -> Option<Role> {
         match s {
             "view" => Some(Role::View),
+            "comment" => Some(Role::Comment),
             "write" => Some(Role::Write),
             _ => None,
         }
@@ -67,9 +70,62 @@ impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
             Role::View => "view",
+            Role::Comment => "comment",
             Role::Write => "write",
         }
     }
+}
+
+/// Top-level Yjs names a comment key may change: the Reviews document (`doc:reviews/reviews`) and its texts.
+fn comment_root(name: &str) -> bool {
+    name == "doc:reviews/reviews" || name.starts_with("text:doc:reviews/reviews#")
+}
+
+/**
+ * Whether `update` only changes the Reviews document. Tried on a copy of the project first; anything it
+ * can't fully place (missing earlier edits) or that touches another top-level name is refused.
+ */
+fn comment_only(doc: &Doc, update: &[u8]) -> bool {
+    use std::sync::atomic::AtomicBool;
+    use yrs::branch::BranchID;
+    let Ok(state) = Update::decode_v1(&doc.transact().encode_state_as_update_v1(&StateVector::default())) else { return false };
+    let copy = Doc::new();
+    {
+        let mut t = copy.transact_mut();
+        if t.apply_update(state).is_err() {
+            return false;
+        }
+    }
+    // Roots arrive untyped; give them the app's types so their changes are reported (texts are XML fragments, the rest maps).
+    let names: Vec<String> = copy.transact().root_refs().map(|(n, _)| n.to_string()).collect();
+    for n in &names {
+        if n.starts_with("text:") {
+            copy.get_or_insert_xml_fragment(n.as_str());
+        } else {
+            copy.get_or_insert_map(n.as_str());
+        }
+    }
+    let bad = Arc::new(AtomicBool::new(false));
+    let flag = bad.clone();
+    let _ = copy.observe_transaction_cleanup("comment-check", move |txn: &yrs::TransactionMut, _| {
+        for b in txn.changed_parent_types() {
+            if let BranchID::Root(name) = b.id()
+                && !comment_root(&name)
+            {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    let Ok(u) = Update::decode_v1(update) else { return false };
+    {
+        let mut t = copy.transact_mut();
+        if t.apply_update(u).is_err() || t.has_missing_updates() {
+            return false;
+        }
+    }
+    // A brand-new top-level name has no type yet and reports no change: check names too.
+    let added = copy.transact().root_refs().any(|(n, _)| !names.iter().any(|o| o == n) && !comment_root(n));
+    !bad.load(Ordering::SeqCst) && !added
 }
 
 pub enum Out {
@@ -473,6 +529,19 @@ impl Room {
         }
         if decoded.is_empty() {
             return Ok(());
+        }
+        if peer.role == Role::Comment {
+            // Enforced here: comment keys can only touch the Reviews document.
+            if !comment_only(&self.doc, &update) {
+                peer.strikes += 1;
+                if peer.strikes >= MAX_STRIKES {
+                    return Err("comment-only connection kept changing more than comments".into());
+                }
+                return Ok(());
+            }
+            if self.app_id.is_none() {
+                return Ok(()); // a comment key never uploads a new project
+            }
         }
         if self.app_id.is_none() {
             // First upload: this project now belongs to that app project id; anyone else is turned away.
@@ -1051,6 +1120,101 @@ mod tests {
         // Unrequested chunks are ignored, whoever sends them.
         r.handle(&app, viewer, &chunk_frame(path, 0, 3, false, &[1, 2, 3])).unwrap();
         assert!(!r.asset_file(path).exists());
+        drop(r);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An update made on a copy of `base` by `edit`.
+    fn edit_of(base: &Doc, edit: impl FnOnce(&Doc)) -> Vec<u8> {
+        let copy = Doc::new();
+        copy.transact_mut()
+            .apply_update(Update::decode_v1(&base.transact().encode_state_as_update_v1(&StateVector::default())).unwrap())
+            .unwrap();
+        let before = copy.transact().state_vector();
+        edit(&copy);
+        copy.transact().encode_diff_v1(&before)
+    }
+
+    #[test]
+    fn comment_keys_only_change_reviews() {
+        use yrs::{Map, MapPrelim, XmlFragment, XmlTextPrelim};
+        let base = Doc::new();
+        {
+            let items = base.get_or_insert_map("doc:items/x");
+            let reviews = base.get_or_insert_map("doc:reviews/reviews");
+            let text = base.get_or_insert_xml_fragment("text:doc:writer/a#body");
+            let mut t = base.transact_mut();
+            items.insert(&mut t, "name", "Sword");
+            let entries = reviews.insert(&mut t, "entries", MapPrelim::default());
+            entries.insert(&mut t, "a", "old");
+            text.insert(&mut t, 0, XmlTextPrelim::new("hello"));
+        }
+        let ok = |u: &[u8]| comment_only(&base, u);
+        // A comment deep inside the Reviews document is fine.
+        assert!(ok(&edit_of(&base, |d| {
+            let r = d.get_or_insert_map("doc:reviews/reviews");
+            let mut t = d.transact_mut();
+            let Some(yrs::Out::YMap(e)) = r.get(&t, "entries") else { panic!() };
+            e.insert(&mut t, "b", "new comment");
+        })));
+        // Anything else is not.
+        assert!(!ok(&edit_of(&base, |d| {
+            let m = d.get_or_insert_map("doc:items/x");
+            m.insert(&mut d.transact_mut(), "name", "Axe");
+        })));
+        assert!(!ok(&edit_of(&base, |d| {
+            let m = d.get_or_insert_map("doc:items/x");
+            m.remove(&mut d.transact_mut(), "name");
+        })));
+        assert!(!ok(&edit_of(&base, |d| {
+            let f = d.get_or_insert_xml_fragment("text:doc:writer/a#body");
+            f.remove_range(&mut d.transact_mut(), 0, 1);
+        })));
+        assert!(!ok(&edit_of(&base, |d| {
+            let m = d.get_or_insert_map("doc:brand-new/y");
+            m.insert(&mut d.transact_mut(), "k", 1);
+        })));
+        // Mixed: refused as a whole.
+        assert!(!ok(&edit_of(&base, |d| {
+            let r = d.get_or_insert_map("doc:reviews/reviews");
+            let m = d.get_or_insert_map("doc:items/x");
+            let mut t = d.transact_mut();
+            r.insert(&mut t, "x", 1);
+            m.insert(&mut t, "name", "Axe");
+        })));
+        // An update that depends on edits the server never saw can't be checked: refused.
+        let other = Doc::new();
+        let first = edit_of(&other, |d| {
+            let m = d.get_or_insert_map("doc:reviews/reviews");
+            m.insert(&mut d.transact_mut(), "k", 1);
+        });
+        other.transact_mut().apply_update(Update::decode_v1(&first).unwrap()).unwrap();
+        let second = edit_of(&other, |d| {
+            let m = d.get_or_insert_map("doc:reviews/reviews");
+            m.insert(&mut d.transact_mut(), "k", 2);
+        });
+        assert!(!ok(&second));
+    }
+
+    #[test]
+    fn comment_keys_cannot_edit_the_project() {
+        let (app, dir) = test_app();
+        let room = app.hub.room(&app, "p").unwrap();
+        let mut r = lock(&room);
+        r.app_id = Some("app".into());
+        let (c, _rx) = ready_peer(&mut r, Role::Comment);
+        let items = edit_of(&r.doc, |d| {
+            let m = d.get_or_insert_map("doc:items/x");
+            yrs::Map::insert(&m, &mut d.transact_mut(), "name", "Axe");
+        });
+        r.handle(&app, c, &sync_frame(SyncMessage::Update(items))).unwrap();
+        assert!(r.doc.transact().get_map("doc:items/x").is_none());
+        let review = edit_of(&r.doc, |d| {
+            let m = d.get_or_insert_map("doc:reviews/reviews");
+            yrs::Map::insert(&m, &mut d.transact_mut(), "k", "comment");
+        });
+        r.handle(&app, c, &sync_frame(SyncMessage::Update(review))).unwrap();
+        assert!(r.doc.transact().get_map("doc:reviews/reviews").is_some());
         drop(r);
         let _ = std::fs::remove_dir_all(dir);
     }
