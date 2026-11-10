@@ -13,7 +13,7 @@ base64 = "0.23.1"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 rcgen = "0.14.10"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 rustls = "0.23.45"
 rustls-acme = { version = "0.15.4", features = ["axum"] }
 serde = { version = "1.0.229", features = ["derive"] }
