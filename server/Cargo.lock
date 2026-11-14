@@ -319,6 +319,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3766086d344b8f8d2a9cf6fb211b581de5b160e052d7bc75a92e58cc41909054"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,7 +828,7 @@ version = "0.8.0"
 dependencies = [
  "argon2",
  "axum",
- "axum-server",
+ "axum-server 0.9.2",
  "base64 0.23.1",
  "futures-util",
  "getrandom 0.4.3",
@@ -2690,7 +2713,7 @@ dependencies = [
  "async-trait",
  "async-web-client",
  "aws-lc-rs",
- "axum-server",
+ "axum-server 0.8.0",
  "base64 0.22.1",
  "blocking",
  "chrono",
